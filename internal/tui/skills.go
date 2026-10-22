@@ -29,12 +29,12 @@ type skillsTab struct {
 	filter    textinput.Model
 	query     string
 
-	upd     *updateRun                     // the running update (nil: none)
-	updGen  int                            // generation of the last started update
+	upd    *updateRun // the running update (nil: none)
+	updGen int        // generation of the last started update
 	// stopping is the generation of a cancelled update that has not returned yet (0: none). Its
 	// goroutine may still sync, build and save; no new update starts on the checkouts meanwhile.
 	stopping int
-	results map[string]catalog.SourceState // last update result per source / remote plugin
+	results  map[string]catalog.SourceState // last update result per source / remote plugin
 }
 
 // updateRun is a running source update.
