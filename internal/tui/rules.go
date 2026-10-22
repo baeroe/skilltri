@@ -175,6 +175,8 @@ func parseRule(mode, path string) (r rules.Rule, modeErr, pathErr string) {
 		pathErr = "enter a folder"
 	case !isRulePath(path):
 		pathErr = "must be an absolute path (or start with ~/)"
+	case slices.Contains(strings.Split(path, "/"), ".."):
+		pathErr = "no .. in rule paths: enter the folder itself"
 	default:
 		path = filepath.Clean(path)
 	}
@@ -219,8 +221,12 @@ type rulesModal struct {
 	undo     *deletedRule
 	check    textinput.Model // the live check's folder
 	paths    pathInput
-	checking bool   // the folder input has the focus
-	busy     string // a write is running: keys are ignored, esc too
+	checking bool         // the folder input has the focus
+	busy     string       // a write runs or its reload is pending: keys are ignored, esc too
+	own      []rules.Rule // the rules a successful write left, shown until its reload lands
+	ownSet   bool
+	waitSeq  int // the snapshot load that must land before the dialog takes keys again (0: none)
+	memo     checkMemo
 	note     string // the last result
 	err      string
 	warns    []string
@@ -232,6 +238,13 @@ type deletedRule struct {
 	index int
 }
 
+// checkMemo caches the live check for one folder value and rule set (Normalize resolves symlinks).
+type checkMemo struct {
+	key           string
+	active, valid bool
+	text          string
+}
+
 // ruleSavedMsg is the result of a write of dialog d (add from the form add, delete, undo).
 type ruleSavedMsg struct {
 	d       *rulesModal
@@ -239,6 +252,7 @@ type ruleSavedMsg struct {
 	text    string
 	warns   []string
 	err     error
+	rules   []rules.Rule // the node's rules after the write
 	deleted *deletedRule // a delete: what u restores
 	undone  bool
 }
@@ -250,6 +264,15 @@ func openRules(m *Model, tg target.Target, what string) tea.Cmd {
 	d.layout(m.width)
 	m.openModal(d)
 	return nil
+}
+
+// node is the dialog's node from the snapshot, with the rules of a write whose reload is pending.
+func (d *rulesModal) node(m *Model) (ruleNode, bool) {
+	n, ok := resolveRuleNode(m.snap, d.tg)
+	if ok && d.ownSet {
+		n.levels[len(n.levels)-1].Rules = d.own
+	}
+	return n, ok
 }
 
 func (d *rulesModal) workKey() string { return fmt.Sprintf("rules:%p", d) }
@@ -281,9 +304,13 @@ func (d *rulesModal) update(m *Model, msg tea.Msg) (tea.Cmd, bool) {
 		if msg.d != d {
 			return nil, false
 		}
-		m.end(d.workKey())
-		d.busy = ""
 		if msg.err != nil {
+			m.end(d.workKey())
+			d.busy = ""
+			if errors.Is(msg.err, actions.ErrChanged) {
+				d.err, d.note = msg.err.Error()+": reloaded, check and try again", ""
+				return m.reload(), false
+			}
 			if msg.add == nil { // the add form shows its own errors
 				d.err, d.note = msg.err.Error(), ""
 			}
@@ -296,7 +323,18 @@ func (d *rulesModal) update(m *Model, msg tea.Msg) (tea.Cmd, bool) {
 		case msg.undone:
 			d.undo = nil
 		}
-		return m.reload(), false
+		// stay busy, showing the written list, until the reload lands: a key before that would
+		// act on stale rules
+		d.own, d.ownSet = msg.rules, true
+		d.busy = "reloading …"
+		cmd := m.reload()
+		d.waitSeq = m.loadSeq
+		return cmd, false
+	case snapshotMsg:
+		if d.waitSeq > 0 && m.snapSeq >= d.waitSeq {
+			d.waitSeq, d.own, d.ownSet, d.busy = 0, nil, false, ""
+			m.end(d.workKey())
+		}
 	case tea.KeyMsg:
 		d.layout(m.width)
 		return d.key(m, msg), false
@@ -324,7 +362,7 @@ func (d *rulesModal) key(m *Model, k tea.KeyMsg) tea.Cmd {
 	if d.busy != "" {
 		return nil
 	}
-	n, ok := resolveRuleNode(m.snap, d.tg)
+	n, ok := d.node(m)
 	var own []rules.Rule
 	if ok {
 		own = n.own()
@@ -363,10 +401,11 @@ func (d *rulesModal) key(m *Model, k tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 		i, r := d.sel, own[d.sel]
+		expect := slices.Clone(own)
+		rs := slices.Delete(slices.Clone(own), i, i+1)
 		return d.write(m, "deleting the rule …", func() ruleSavedMsg {
-			err := actions.RuleRemove(env, tg, i+1)
 			return ruleSavedMsg{text: fmt.Sprintf("deleted rule %d: %s %s (u undoes)", i+1, r.Mode, oneLine(r.Path)),
-				err: err, deleted: &deletedRule{rule: r, index: i}}
+				err: actions.RuleSet(env, tg, expect, rs), rules: rs, deleted: &deletedRule{rule: r, index: i}}
 		})
 	default: // u
 		if d.undo == nil {
@@ -374,12 +413,18 @@ func (d *rulesModal) key(m *Model, k tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 		u := *d.undo
+		if slices.Contains(own, u.rule) {
+			d.undo = nil
+			d.err, d.note = "", "nothing to undo: "+string(u.rule.Mode)+" "+oneLine(u.rule.Path)+" is already there"
+			return nil
+		}
 		i := min(u.index, len(own))
+		expect := slices.Clone(own)
 		rs := slices.Insert(slices.Clone(own), i, u.rule)
 		d.sel = i
 		return d.write(m, "restoring the rule …", func() ruleSavedMsg {
 			return ruleSavedMsg{text: fmt.Sprintf("restored rule %d: %s %s", i+1, u.rule.Mode, oneLine(u.rule.Path)),
-				err: actions.RuleSet(env, tg, rs), undone: true}
+				err: actions.RuleSet(env, tg, expect, rs), rules: rs, undone: true}
 		})
 	}
 }
@@ -401,7 +446,7 @@ func (d *rulesModal) view(m *Model, w, h int) string {
 	bw, iw := d.dims(w)
 	home := m.opts.Home
 	title := "Rules of " + oneLine(d.what)
-	n, ok := resolveRuleNode(m.snap, d.tg)
+	n, ok := d.node(m)
 	if !ok {
 		lines := []string{badStyle.Render(fit("✗ "+oneLine(d.what)+" no longer exists", iw)), "", dimStyle.Render("esc closes")}
 		return modalBox(title, lines[:min(len(lines), max(h-2, 1))], bw, cAccent)
@@ -453,7 +498,11 @@ func (d *rulesModal) view(m *Model, w, h int) string {
 			rest = append(rest, indent+dimStyle.Render(l))
 		}
 	}
-	active, text, valid := checkFolder(n, d.check.Value(), home)
+	if key := d.check.Value() + "\x00" + fmt.Sprint(n.levels); key != d.memo.key {
+		active, text, valid := checkFolder(n, d.check.Value(), home)
+		d.memo = checkMemo{key: key, active: active, valid: valid, text: text} // a cache, not state
+	}
+	active, text, valid := d.memo.active, d.memo.text, d.memo.valid
 	mark, st := "✗ ", badStyle
 	switch {
 	case !valid:
@@ -571,9 +620,13 @@ func (a *ruleAddModal) save(m *Model) tea.Cmd {
 		return nil
 	}
 	env, tg := m.opts.Env, a.d.tg
+	var after []rules.Rule
+	if n, ok := a.d.node(m); ok {
+		after = append(slices.Clone(n.own()), r)
+	}
 	cmd := a.d.write(m, "adding the rule …", func() ruleSavedMsg {
 		warns, err := actions.RuleAdd(env, tg, r)
-		return ruleSavedMsg{add: a, text: "added rule " + string(r.Mode) + " " + oneLine(r.Path), warns: warns, err: err}
+		return ruleSavedMsg{add: a, text: "added rule " + string(r.Mode) + " " + oneLine(r.Path), warns: warns, err: err, rules: after}
 	})
 	if cmd != nil {
 		f.busy = "adding …"

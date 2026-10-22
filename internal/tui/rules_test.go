@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/baeroe/skilltri/internal/config"
 	"github.com/baeroe/skilltri/internal/rules"
@@ -112,6 +113,7 @@ func TestRulesDialogSkill(t *testing.T) {
 	if v := h.rulesDialog().check.Value(); v != "~/dev/x/sub/" {
 		t.Errorf("check folder completed to %q", v)
 	}
+	wantScreen(t, h, "check completed", "~/dev/x/sub/", "✓ demo-local/demo-alpha: included by tree")
 	h.key("esc") // leaves the folder input, not the dialog
 	h.rulesDialog()
 	h.key("esc")
@@ -245,6 +247,9 @@ func TestParseRule(t *testing.T) {
 		{"bogus", "/abs", true, true},
 		{"not", "rel/dir", false, false},
 		{"not-tree", "", false, false},
+		{"tree", "/work/../etc", false, false},
+		{"tree", "~/..", false, false},
+		{"tree", "/work/..x", false, true},
 	} {
 		r, me, pe := parseRule(tc.mode, tc.path)
 		if (me != "") != tc.modeErr || (pe == "") != tc.pathOK {
@@ -370,5 +375,130 @@ func TestRulesNoOverflow(t *testing.T) {
 		h.set("path", "/"+strings.Repeat("q", 200))
 		checkScreen(t, h.m.View(), sz[0], sz[1], "add form")
 		h.key("esc", "esc")
+	}
+}
+
+// runHolding runs cmd like harness.run but keeps the snapshot loads it produces (returned, not
+// delivered), so a test sees the dialog before the reload lands.
+func (h *harness) runHolding(cmd tea.Cmd) []tea.Cmd {
+	if cmd == nil {
+		return nil
+	}
+	switch msg := cmd().(type) {
+	case snapshotMsg: // loaded now, delivered when the test runs the returned command
+		return []tea.Cmd{func() tea.Msg { return msg }}
+	case nil, tea.QuitMsg, tickMsg:
+		return nil
+	case tea.BatchMsg:
+		var held []tea.Cmd
+		for _, c := range msg {
+			held = append(held, h.runHolding(c)...)
+		}
+		return held
+	default:
+		_, next := h.m.Update(msg)
+		return h.runHolding(next)
+	}
+}
+
+// keyHolding presses k and holds the snapshot loads it causes.
+func (h *harness) keyHolding(k string) []tea.Cmd {
+	_, cmd := h.m.Update(keyMsg(k))
+	return h.runHolding(cmd)
+}
+
+func TestRulesDialogBeforeReload(t *testing.T) {
+	h := newHarness(t, TabServers)
+	a, b, c := rules.Rule{Path: "/a", Mode: rules.Tree}, rules.Rule{Path: "/b", Mode: rules.Tree}, rules.Rule{Path: "/c", Mode: rules.Not}
+	cfg := demoConfig(1)
+	cfg.Servers["demo-1"].Rules = []rules.Rule{a, b, c}
+	h.writeConfig(cfg)
+	h.load()
+	got := func() []rules.Rule { return h.config().Servers["demo-1"].Rules }
+	h.key("r")
+
+	// d d: the second d waits for the reload instead of deleting by a stale number
+	held := h.keyHolding("d")
+	if !slices.Equal(got(), []rules.Rule{b, c}) {
+		t.Fatalf("after d = %+v", got())
+	}
+	wantScreen(t, h, "before reload", "1  tree", "/b") // the dialog shows the written list
+	if h.keyHolding("d") != nil || !slices.Equal(got(), []rules.Rule{b, c}) {
+		t.Fatalf("d before the reload changed the rules: %+v", got())
+	}
+	for _, cmd := range held {
+		h.run(cmd)
+	}
+
+	// d u: undo before the reload is ignored, after it restores exactly once
+	held = h.keyHolding("d")
+	if !slices.Equal(got(), []rules.Rule{c}) {
+		t.Fatalf("after second d = %+v", got())
+	}
+	h.keyHolding("u")
+	if !slices.Equal(got(), []rules.Rule{c}) {
+		t.Fatalf("u before the reload wrote: %+v", got())
+	}
+	for _, cmd := range held {
+		h.run(cmd)
+	}
+	h.key("u")
+	if !slices.Equal(got(), []rules.Rule{b, c}) {
+		t.Fatalf("after undo = %+v", got())
+	}
+	h.key("u")
+	if !slices.Equal(got(), []rules.Rule{b, c}) {
+		t.Fatalf("second undo wrote: %+v", got())
+	}
+
+	// undo skips a rule that is back already
+	h.key("d") // deletes b
+	cfg.Servers["demo-1"].Rules = []rules.Rule{c, b}
+	h.writeConfig(cfg)
+	h.run(h.m.reload())
+	h.key("u")
+	if !slices.Equal(got(), []rules.Rule{c, b}) {
+		t.Fatalf("undo duplicated a rule: %+v", got())
+	}
+	wantScreen(t, h, "already there", "already there")
+
+	// the config changed elsewhere and was not reloaded yet: delete refuses
+	cfg.Servers["demo-1"].Rules = []rules.Rule{a, c, b}
+	h.writeConfig(cfg)
+	h.key("d")
+	if !slices.Equal(got(), []rules.Rule{a, c, b}) {
+		t.Fatalf("delete on a stale list wrote: %+v", got())
+	}
+	wantScreen(t, h, "changed", "changed meanwhile")
+}
+
+func TestRulesNeedConfig(t *testing.T) {
+	for _, tab := range []Tab{TabServers, TabSkills} {
+		h := newHarness(t, tab)
+		os.MkdirAll(filepath.Dir(h.m.opts.Env.ConfigPath), 0o700)
+		os.WriteFile(h.m.opts.Env.ConfigPath, []byte("{broken"), 0o600)
+		h.load()
+		h.key("r")
+		if len(h.m.modals) != 0 {
+			t.Errorf("%v: a dialog opened without a config", tab)
+		}
+		wantScreen(t, h, "need config", "fix the config first")
+	}
+}
+
+// TestRulesCheckCached: the live check is evaluated once per folder value and rule set, not on
+// every render.
+func TestRulesCheckCached(t *testing.T) {
+	h := newHarness(t, TabServers)
+	h.writeConfig(demoConfig(1))
+	h.load()
+	h.key("r")
+	screen(h)
+	d := h.rulesDialog()
+	d.memo.text = "demo cached reason"
+	wantScreen(t, h, "cached", "demo cached reason")
+	h.key("c", "/")
+	if v := screen(h); strings.Contains(v, "demo cached reason") || !strings.Contains(v, "no rules: active everywhere") {
+		t.Errorf("not re-evaluated for a new folder:\n%s", v)
 	}
 }

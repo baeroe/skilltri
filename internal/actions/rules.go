@@ -2,6 +2,7 @@ package actions
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 
 	"github.com/baeroe/skilltri/internal/config"
@@ -78,9 +79,11 @@ func RuleClear(e Env, t target.Target) error {
 	})
 }
 
-// RuleSet replaces the rule list of the node t with rs (validated; nil clears it), e.g. to put a
-// removed rule back at its old place. A missing tool, plugin or skill entry is made like RuleAdd.
-func RuleSet(e Env, t target.Target, rs []rules.Rule) error {
+// RuleSet replaces the rule list of the node t with rs (validated; nil clears it) if it still
+// equals expect (what the caller read), else it wraps ErrChanged and writes nothing. The TUI
+// deletes and restores rules with it, so a stale view never removes the wrong rule. A missing
+// tool, plugin or skill entry is made like RuleAdd.
+func RuleSet(e Env, t target.Target, expect, rs []rules.Rule) error {
 	for _, r := range rs {
 		if err := r.Validate(); err != nil {
 			return err
@@ -90,6 +93,9 @@ func RuleSet(e Env, t target.Target, rs []rules.Rule) error {
 		ref, err := resolve(c, t, true)
 		if err != nil {
 			return err
+		}
+		if !slices.Equal(*ref.Rules, expect) {
+			return wrap(ErrChanged, "the rules of %s changed meanwhile", t)
 		}
 		*ref.Rules = append([]rules.Rule(nil), rs...)
 		return nil

@@ -25,6 +25,8 @@ var (
 	// ErrInvalid is wrapped by errors about a malformed reference or an unknown identifier (a bad
 	// plugin server reference, an unknown adapter id), as opposed to a failed validation of values.
 	ErrInvalid = errors.New("invalid")
+	// ErrChanged is wrapped by errors about a value that changed since the caller read it.
+	ErrChanged = errors.New("changed")
 )
 
 // kindError carries a human message and the sentinel callers match with errors.Is.
