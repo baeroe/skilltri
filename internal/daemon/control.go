@@ -145,6 +145,8 @@ func (d *Daemon) control(conn net.Conn, h Hello, herr error) {
 			result, err = d.which(h)
 		case "update":
 			result, err = d.update(h.Args)
+		case "restart":
+			err = d.restart(h.Args)
 		case "shutdown":
 			defer d.cancel() // after the reply is written; Run then stops like on SIGTERM
 			d.log.Printf("shutdown requested")
@@ -162,6 +164,20 @@ func (d *Daemon) control(conn net.Conn, h Hello, herr error) {
 	if _, err := conn.Write(append(b, '\n')); err != nil {
 		d.log.Printf("control %s: %v", h.Cmd, err)
 	}
+}
+
+// restart stops every instance of the configured server Args[0]; the next session (or which)
+// starts a fresh process.
+func (d *Daemon) restart(args []string) error {
+	if len(args) != 1 || args[0] == "" {
+		return errors.New("restart needs a server name")
+	}
+	if d.cfg.Load().Servers[args[0]] == nil {
+		return fmt.Errorf("no such server %q", args[0])
+	}
+	d.log.Printf("restart %s requested", args[0])
+	d.mgr.Restart(args[0])
+	return nil
 }
 
 func (d *Daemon) status() StatusReply {

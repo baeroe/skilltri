@@ -33,6 +33,9 @@ type harness struct {
 	status *daemon.StatusReply // nil: the fake daemon is not running
 	ctlErr error               // returned when status is nil (default: connection refused)
 	calls  int
+	which  *daemon.WhichReply // the running fake daemon's which reply
+	hellos []daemon.Hello     // every control request
+	cmdErr map[string]error   // per control command error of the running fake daemon
 }
 
 func newHarness(t *testing.T, tab Tab) *harness {
@@ -54,14 +57,23 @@ func newHarness(t *testing.T, tab Tab) *harness {
 		Now:    func() time.Time { return h.now },
 		Control: func(hello daemon.Hello, reply any) error {
 			h.calls++
+			h.hellos = append(h.hellos, hello)
 			if h.status == nil {
 				if h.ctlErr != nil {
 					return h.ctlErr
 				}
 				return &os.SyscallError{Syscall: "connect", Err: syscall.ECONNREFUSED}
 			}
-			if r, ok := reply.(*daemon.StatusReply); ok {
+			if err := h.cmdErr[hello.Cmd]; err != nil {
+				return err
+			}
+			switch r := reply.(type) {
+			case *daemon.StatusReply:
 				*r = *h.status
+			case *daemon.WhichReply:
+				if h.which != nil {
+					*r = *h.which
+				}
 			}
 			return nil
 		},
@@ -111,6 +123,20 @@ func (h *harness) key(keys ...string) {
 			msg = tea.KeyMsg{Type: tea.KeyCtrlC}
 		case "down":
 			msg = tea.KeyMsg{Type: tea.KeyDown}
+		case "up":
+			msg = tea.KeyMsg{Type: tea.KeyUp}
+		case "left":
+			msg = tea.KeyMsg{Type: tea.KeyLeft}
+		case "right":
+			msg = tea.KeyMsg{Type: tea.KeyRight}
+		case "backspace":
+			msg = tea.KeyMsg{Type: tea.KeyBackspace}
+		case "ctrl+s":
+			msg = tea.KeyMsg{Type: tea.KeyCtrlS}
+		case "ctrl+u":
+			msg = tea.KeyMsg{Type: tea.KeyCtrlU}
+		case " ":
+			msg = tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}}
 		default:
 			msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
 		}

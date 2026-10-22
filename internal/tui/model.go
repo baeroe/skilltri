@@ -165,6 +165,7 @@ func New(o Options) *Model {
 	for t := Tab(0); t < numTabs; t++ {
 		m.tabs[t] = &placeholderTab{tab: t}
 	}
+	m.tabs[TabServers] = newServersTab()
 	return m
 }
 
@@ -498,10 +499,9 @@ func (m *Model) footer(w int) string {
 		st = badStyle
 	}
 	room := w - width(left) - 3
-	if room < 20 {
+	if room < width(status) { // the status wins over the hints while it is shown
 		return fit(" "+st.Render(fit(status, max(w-2, 0))), w)
 	}
-	status = fit(status, min(room, width(status)))
 	return left + strings.Repeat(" ", w-width(left)-width(status)-1) + st.Render(status) + " "
 }
 
@@ -520,14 +520,6 @@ func (p *placeholderTab) view(m *Model, w, h int) string {
 	var lines []string
 	s := m.snap
 	switch p.tab {
-	case TabServers:
-		for _, n := range s.serverNames() {
-			icon := dimStyle.Render("○")
-			if s.serverState(n) == "ready" {
-				icon = goodStyle.Render("●")
-			}
-			lines = append(lines, icon+" "+oneLine(n))
-		}
 	case TabSkills:
 		if s.Catalog != nil {
 			for _, e := range s.Catalog.Skills {

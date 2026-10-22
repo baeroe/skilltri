@@ -14,6 +14,7 @@ import (
 	"github.com/baeroe/skilltri/internal/catalog"
 	"github.com/baeroe/skilltri/internal/config"
 	"github.com/baeroe/skilltri/internal/daemon"
+	"github.com/baeroe/skilltri/internal/downstream"
 	"github.com/baeroe/skilltri/internal/paths"
 )
 
@@ -186,15 +187,15 @@ func (s Snapshot) serverNames() []string {
 	return names
 }
 
-// serverState is the daemon's state of a server ("" when the daemon does not run).
-func (s Snapshot) serverState(name string) string {
+// statusOf is the daemon's status of server name (nil when the daemon does not run or lacks it).
+func (s Snapshot) statusOf(name string) *downstream.ServerStatus {
 	if s.Status == nil {
-		return ""
+		return nil
 	}
-	for _, st := range s.Status.Servers {
-		if st.Name == name {
-			return st.State
+	for i := range s.Status.Servers {
+		if s.Status.Servers[i].Name == name {
+			return &s.Status.Servers[i]
 		}
 	}
-	return ""
+	return nil
 }

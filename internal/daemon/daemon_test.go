@@ -722,3 +722,31 @@ func TestSkillFallbackFollowsClient(t *testing.T) {
 		t.Fatalf("native client lists the skill tools: %v", native.allTools(t))
 	}
 }
+
+// "restart" stops the server's instances; the next session starts a fresh process. Unknown or
+// missing server names are errors.
+func TestControlRestart(t *testing.T) {
+	e := newEnv(t)
+	p, _ := projectDirs(t)
+	e.writeConfig(t, cfgOf(map[string]*config.Server{"a": fake("a", "x")}))
+	e.start(t)
+	c := e.connect(t, Hello{Dir: p})
+	pid := c.pid(t, "a_x")
+	if err := Control(e.sock, Hello{Cmd: "restart", Args: []string{"a"}}, nil); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	eventually(t, 5*time.Second, "restarted server", func() bool {
+		res, err := c.cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "a_x", Arguments: map[string]any{}})
+		if err != nil || res.IsError {
+			return false
+		}
+		var echo fakemcp.Echo
+		return json.Unmarshal([]byte(res.Content[0].(*mcp.TextContent).Text), &echo) == nil && echo.PID != pid
+	})
+	if err := Control(e.sock, Hello{Cmd: "restart", Args: []string{"nope"}}, nil); err == nil || !strings.Contains(err.Error(), "nope") {
+		t.Fatalf("restart of an unknown server: %v", err)
+	}
+	if err := Control(e.sock, Hello{Cmd: "restart"}, nil); err == nil {
+		t.Fatal("restart without a server succeeded")
+	}
+}
