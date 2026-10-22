@@ -168,6 +168,7 @@ type Model struct {
 	busyKeys    []string          // pending work, oldest first (see begin)
 	busyText    map[string]string // its status text
 	busyPassive map[string]bool   // keys started with beginPassive
+	homes       []string          // the home folder's forms for tildeText and tildeDir (homeForms, computed once)
 	// msgSeq orders flashes and non-passive busy starts: a flash newer than the newest busy start
 	// shows over the spinner until it expires (flashSeq > busySeq).
 	msgSeq, flashSeq, busySeq int
@@ -307,7 +308,7 @@ func New(o Options) *Model {
 	if o.Tab < 0 || o.Tab >= numTabs {
 		o.Tab = TabServers
 	}
-	m := &Model{opts: o, tab: o.Tab, cmdName: commandName(o.Bin, exec.LookPath)}
+	m := &Model{opts: o, tab: o.Tab, cmdName: commandName(o.Bin, exec.LookPath), homes: homeForms(o.Home)}
 	m.tabs[TabServers] = newServersTab()
 	m.tabs[TabSkills] = newSkillsTab()
 	m.tabs[TabPreview] = newPreviewTab(o.Cwd, o.Home)

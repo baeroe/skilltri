@@ -263,3 +263,30 @@ func TestPreviewOverflow(t *testing.T) {
 		}
 	}
 }
+
+// TestPreviewNormalizesInTheQuery: resolving symlinks (which can hang on a dead mount) happens in
+// the query command, not in Update; the reply brings the normalized folder.
+func TestPreviewNormalizesInTheQuery(t *testing.T) {
+	h := newHarness(t, TabPreview)
+	dirA, _, _ := previewSetup(h)
+	h.load()
+	link := filepath.Join(h.dir, "link-a")
+	if err := os.Symlink(dirA, link); err != nil {
+		t.Fatal(err)
+	}
+	p := h.preview()
+	h.key("/")
+	p.input.SetValue("")
+	h.key(link, "esc")
+	_, cmd := h.m.Update(previewDebounceMsg{seq: p.inSeq})
+	if p.dir != link {
+		t.Fatalf("before the query ran: dir %q, want the unresolved %q", p.dir, link)
+	}
+	h.run(cmd)
+	if p.dir != dirA {
+		t.Fatalf("after the query: dir %q, want %q", p.dir, dirA)
+	}
+	if !strings.Contains(screen(h), "demo-a") {
+		t.Errorf("preview of the link target lacks demo-a:\n%s", screen(h))
+	}
+}

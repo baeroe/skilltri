@@ -244,9 +244,10 @@ func previewClaudeLines(r importer.ClaudeResult, rep importer.ClaudeReport, skil
 }
 
 func tildeAll(steps []string, home string) []string {
+	homes := homeForms(home) // in a command: normalizing may touch the file system
 	out := make([]string, len(steps))
 	for i, s := range steps {
-		out[i] = tildeText(s, home)
+		out[i] = tildeText(s, homes)
 	}
 	return out
 }

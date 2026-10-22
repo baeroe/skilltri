@@ -225,10 +225,10 @@ func (t *doctorTab) listLines(m *Model, iw, ih int) []string {
 			}
 			lines = append(lines, boldStyle.Render(sevTitles[f.Severity]))
 		}
-		subject := ellipsizeMiddle(oneLine(tildeText(f.Subject, m.opts.Home)), max(min(iw-2, max(iw*2/5, 12)), 1))
+		subject := ellipsizeMiddle(oneLine(tildeText(f.Subject, m.homes)), max(min(iw-2, max(iw*2/5, 12)), 1))
 		line := sevIcon(f.Severity) + " " + subject
 		if left := iw - width(line) - 2; left >= 4 {
-			line += "  " + dimStyle.Render(ellipsizeMiddle(oneLine(tildeText(f.Message, m.opts.Home)), left))
+			line += "  " + dimStyle.Render(ellipsizeMiddle(oneLine(tildeText(f.Message, m.homes)), left))
 		}
 		if i == t.idx {
 			sel = len(lines)
@@ -249,7 +249,7 @@ func (t *doctorTab) detailLines(m *Model, iw int) []string {
 	vw := max(iw-lw, 1)
 	var out []string
 	para := func(label, text string, style func(...string) string) {
-		for i, l := range wrap(tildeText(text, m.opts.Home), vw) {
+		for i, l := range wrap(tildeText(text, m.homes), vw) {
 			if i > 0 {
 				label = ""
 			}

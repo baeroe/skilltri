@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -28,6 +29,7 @@ type previewDebounceMsg struct{ seq int }
 // previewMsg is the result of a which query; seq tells stale results apart.
 type previewMsg struct {
 	seq     int
+	dir     string // the normalized folder
 	reply   *daemon.WhichReply
 	offline bool // decided from the files: no tool lists
 	err     error
@@ -99,7 +101,8 @@ func (t *previewTab) hints() []string {
 
 // --- query ---------------------------------------------------------------------------------
 
-// folder is the normalized folder of the input; ok is false (with why) when it is not a path.
+// folder is the folder of the input with ~ expanded, or why it is not a path. It is not normalized
+// here: resolving symlinks touches the file system, so the query command does it.
 func (t *previewTab) folder(m *Model) (dir, why string) {
 	v := strings.TrimSpace(t.input.Value())
 	if !isRulePath(v) {
@@ -108,7 +111,7 @@ func (t *previewTab) folder(m *Model) (dir, why string) {
 	if v == "~" || strings.HasPrefix(v, "~/") {
 		v = m.opts.Home + v[1:]
 	}
-	return rules.Normalize(v), ""
+	return filepath.Clean(v), ""
 }
 
 // snapKey changes when the data a query depends on changes: another snapshot, the daemon coming
@@ -135,7 +138,7 @@ func (t *previewTab) start(m *Model, passive bool) tea.Cmd {
 		return nil
 	}
 	t.dir = dir
-	text := "previewing " + ellipsizeMiddle(tildeDir(san(dir), m.opts.Home), 40) + " …"
+	text := "previewing " + ellipsizeMiddle(tildeDir(san(dir), m.homes), 40) + " …"
 	if passive {
 		m.beginPassive(previewWork, text)
 	} else {
@@ -144,17 +147,18 @@ func (t *previewTab) start(m *Model, passive bool) tea.Cmd {
 	seq, ctl, via := t.seq, m.opts.Control, m.snap.Status != nil
 	cfg, cat := m.snap.Config, m.snap.Catalog
 	return func() tea.Msg {
+		dir := rules.Normalize(dir)
 		if via {
 			var r daemon.WhichReply
 			if err := ctl(daemon.Hello{Cmd: "which", Args: []string{dir}}, &r); err == nil {
-				return previewMsg{seq: seq, reply: &r}
+				return previewMsg{seq: seq, dir: dir, reply: &r}
 			}
 		}
 		if cfg == nil {
-			return previewMsg{seq: seq, err: errors.New("config not loaded")}
+			return previewMsg{seq: seq, dir: dir, err: errors.New("config not loaded")}
 		}
 		r := daemon.WhichOffline(cfg, cat, dir)
-		return previewMsg{seq: seq, reply: &r, offline: true}
+		return previewMsg{seq: seq, dir: dir, reply: &r, offline: true}
 	}
 }
 
@@ -289,7 +293,7 @@ func (t *previewTab) update(m *Model, msg tea.Msg) tea.Cmd {
 			return nil // superseded by a newer query
 		}
 		m.end(previewWork)
-		t.reply, t.offline, t.err = msg.reply, msg.offline, msg.err
+		t.dir, t.reply, t.offline, t.err = msg.dir, msg.reply, msg.offline, msg.err
 		t.rebuild()
 	case tea.KeyMsg:
 		if t.editing {
@@ -372,8 +376,9 @@ func (t *previewTab) copyEnv(m *Model) tea.Cmd {
 		m.flash(why, true)
 		return nil
 	}
-	line, clip := envLine(dir), m.opts.Clipboard
+	clip := m.opts.Clipboard
 	return m.act(previewCopyWork, "copying …", false, func() (string, error) {
+		line := envLine(rules.Normalize(dir))
 		if err := clip(line); err != nil {
 			return "", err
 		}
@@ -454,7 +459,7 @@ func (t *previewTab) folderPanel(m *Model, w, h int) string {
 		default:
 			src = "  " + dimStyle.Render("from the daemon")
 		}
-		shown := ellipsizeMiddle(tildeDir(san(t.dir), m.opts.Home), max(iw-pvLabelW-width(src), 8))
+		shown := ellipsizeMiddle(tildeDir(san(t.dir), m.homes), max(iw-pvLabelW-width(src), 8))
 		lines = append(lines, labelStyle.Render(fit("", pvLabelW))+dimStyle.Render(shown)+src)
 	default:
 		if _, why := t.folder(m); why != "" {
@@ -545,16 +550,22 @@ func (t *previewTab) rowLine(m *Model, r pvRow, iw int) string {
 
 // reason is the decision's reason on one line, with the home folder as ~.
 func (t *previewTab) reason(m *Model, r pvRow) string {
-	return tildeText(oneLine(r.dec.Reason), m.opts.Home)
+	return tildeText(oneLine(r.dec.Reason), m.homes)
 }
 
-// tildeText shows the home folder (as given and normalized: macOS temp folders are symlinks) as ~
-// in text.
-func tildeText(s, home string) string {
+// homeForms are the forms of the home folder tildeText and tildeDir replace by ~: normalized
+// (macOS temp folders are symlinks) and as given. Normalizing touches the file system, so the
+// Model computes them once (Model.homes) and commands call this off the UI path.
+func homeForms(home string) []string {
 	if home == "" {
-		return s
+		return nil
 	}
-	for _, h := range []string{rules.Normalize(home), home} {
+	return []string{rules.Normalize(home), home}
+}
+
+// tildeText shows the home folder (homes, from homeForms) as ~ in text.
+func tildeText(s string, homes []string) string {
+	for _, h := range homes {
 		if h = strings.TrimSuffix(h, "/"); h != "" {
 			s = strings.ReplaceAll(s, h+"/", "~/")
 		}
@@ -562,15 +573,14 @@ func tildeText(s, home string) string {
 	return s
 }
 
-// tildeDir is tildify for a normalized folder.
-func tildeDir(p, home string) string {
-	if home == "" {
-		return p
+// tildeDir is tildify for a normalized folder (homes from homeForms).
+func tildeDir(p string, homes []string) string {
+	for _, h := range homes {
+		if q := tildify(p, h); q != p {
+			return q
+		}
 	}
-	if q := tildify(p, rules.Normalize(home)); q != p {
-		return q
-	}
-	return tildify(p, home)
+	return p
 }
 
 // detailLines describe the selected row in full.
