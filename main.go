@@ -15,11 +15,13 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/baeroe/skilltri/internal/cli"
 	"github.com/baeroe/skilltri/internal/daemon"
 	"github.com/baeroe/skilltri/internal/gateway"
 	"github.com/baeroe/skilltri/internal/importer"
 	"github.com/baeroe/skilltri/internal/paths"
 	"github.com/baeroe/skilltri/internal/secrets"
+	"github.com/baeroe/skilltri/internal/service"
 	"github.com/baeroe/skilltri/internal/shim"
 )
 
@@ -33,8 +35,9 @@ Usage:
   skilltri daemon           run the gateway daemon in the foreground
   skilltri daemon install   install and start the daemon as a login service
   skilltri daemon uninstall stop and remove the login service
-  skilltri status           show daemon, servers and config errors
-  skilltri which            show the resolved config, state and data paths
+  skilltri status [--json]  show daemon, servers and config errors
+  skilltri which [dir] [--json]
+                            show which servers and tools a session in dir gets
   skilltri import 1mcp [file] [--force]
                             import servers from a 1MCP mcp.json
   skilltri secret set NAME  store a secret in the keyring
@@ -66,9 +69,10 @@ func run(args []string) int {
 		return runDaemon(args[1:])
 	case "mcp":
 		return runMCP(args[1:])
-	case "status", "which":
-		fmt.Fprintf(os.Stderr, "skilltri %s: not implemented yet\n", cmd)
-		return 1
+	case "status":
+		return runStatus(args[1:])
+	case "which":
+		return runWhich(args[1:])
 	case "import":
 		return runImport(args[1:])
 	case "secret":
@@ -84,8 +88,7 @@ func runDaemon(args []string) int {
 	if len(args) > 0 {
 		switch args[0] {
 		case "install", "uninstall":
-			fmt.Fprintf(os.Stderr, "skilltri daemon %s: not implemented yet\n", args[0])
-			return 1
+			return runService(args[0])
 		default:
 			fmt.Fprint(os.Stderr, "usage: skilltri daemon [install | uninstall]\n")
 			return 2
@@ -249,4 +252,55 @@ func runImport(args []string) int {
 	}
 
 	return importInto(paths.ConfigFile(), res, force, os.Stdout, os.Stderr)
+}
+
+// runStatus implements `skilltri status [--json]`.
+func runStatus(args []string) int {
+	if len(args) > 1 || (len(args) == 1 && args[0] != "--json") {
+		fmt.Fprint(os.Stderr, "usage: skilltri status [--json]\n")
+		return 2
+	}
+	return cli.Status(os.Stdout, len(args) == 1)
+}
+
+// runWhich implements `skilltri which [dir] [--json]`; dir defaults to the working directory.
+func runWhich(args []string) int {
+	jsonOut, dir := false, ""
+	for _, a := range args {
+		switch {
+		case a == "--json":
+			jsonOut = true
+		case dir == "" && !strings.HasPrefix(a, "-"):
+			dir = a
+		default:
+			fmt.Fprint(os.Stderr, "usage: skilltri which [dir] [--json]\n")
+			return 2
+		}
+	}
+	return cli.Which(os.Stdout, dir, jsonOut)
+}
+
+// runService installs or uninstalls the login service for the running binary.
+func runService(action string) int {
+	var err error
+	if action == "install" {
+		var exe string
+		if exe, err = os.Executable(); err == nil {
+			if exe, err = filepath.EvalSymlinks(exe); err == nil {
+				err = service.Install(exe)
+			}
+		}
+	} else {
+		err = service.Uninstall()
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "skilltri: daemon %s: %v\n", action, err)
+		return 1
+	}
+	if action == "install" {
+		fmt.Println("daemon service installed and started")
+	} else {
+		fmt.Println("daemon service stopped and removed")
+	}
+	return 0
 }

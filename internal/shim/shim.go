@@ -82,7 +82,10 @@ func StartDetached(exe string) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	return cmd.Process.Release()
+	// Reap the child when it exits (a daemon that loses the lock race exits at once); the
+	// goroutine ends with the shim otherwise.
+	go func() { _ = cmd.Wait() }()
+	return nil
 }
 
 // Run writes h as the hello line on conn and relays in → conn and conn → out. When in hits EOF,
