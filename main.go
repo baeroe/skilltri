@@ -51,7 +51,8 @@ Usage:
                             update skill sources now (all when none is named)
   skilltri source add local NAME PATH
   skilltri source add git NAME URL [--ref R] [--subpath P] [--every D]
-  skilltri source add marketplace NAME URL|PATH [--ref R] [--every D]
+  skilltri source add marketplace NAME URL|PATH [--ref R] [--every D] [--plugins enabled|disabled]
+                            --plugins disabled: only plugins you enable get fetched
                             add a skill source (git and marketplace are fetched by "update")
   skilltri source remove NAME
   skilltri source list [--json]
@@ -416,7 +417,7 @@ func runUpdate(args []string) int {
 	return cli.Update(os.Stdout, names, jsonOut)
 }
 
-const usageSource = "usage: skilltri source add local NAME PATH | add git NAME URL [--ref R] [--subpath P] [--every D] | add marketplace NAME URL|PATH [--ref R] [--every D] | remove NAME | list [--json]\n"
+const usageSource = "usage: skilltri source add local NAME PATH | add git NAME URL [--ref R] [--subpath P] [--every D] | add marketplace NAME URL|PATH [--ref R] [--every D] [--plugins enabled|disabled] | remove NAME | list [--json]\n"
 
 // splitFlags separates positional arguments from the value flags in valued (--ref R or --ref=R)
 // and the boolean flags in bools. ok is false on an unknown flag or a missing value.
@@ -456,12 +457,17 @@ func runSource(args []string) int {
 	}
 	switch args[0] {
 	case "add":
-		pos, vals, _, ok := splitFlags(args[1:], []string{"--ref", "--subpath", "--every"}, nil)
+		pos, vals, _, ok := splitFlags(args[1:], []string{"--ref", "--subpath", "--every", "--plugins"}, nil)
 		if !ok || len(pos) != 3 {
 			fmt.Fprint(os.Stderr, usageSource)
 			return 2
 		}
 		kind, name, loc := pos[0], pos[1], pos[2]
+		plugins, hasPlugins := vals["--plugins"]
+		if hasPlugins && (kind != "marketplace" || (plugins != "enabled" && plugins != "disabled")) {
+			fmt.Fprint(os.Stderr, usageSource)
+			return 2
+		}
 		src := config.Source{Type: kind, Ref: vals["--ref"], Subpath: vals["--subpath"], UpdateEvery: vals["--every"]}
 		switch kind {
 		case "local":
@@ -481,6 +487,9 @@ func runSource(args []string) int {
 				src.Path = cli.LocalPath(loc)
 			} else {
 				src.URL = loc
+			}
+			if plugins == "disabled" {
+				src.PluginsDefault = config.PluginsDisabled
 			}
 		default:
 			fmt.Fprint(os.Stderr, usageSource)

@@ -13,7 +13,6 @@ import (
 	"strings"
 
 	"github.com/baeroe/skilltri/internal/config"
-	"github.com/baeroe/skilltri/internal/marketplace"
 )
 
 // ClaudeResult is what FromClaude found in a Claude Code home.
@@ -41,7 +40,6 @@ func FromClaude(home string) (ClaudeResult, error) {
 			URL    string `json:"url"`
 			Path   string `json:"path"`
 		} `json:"source"`
-		InstallLocation string `json:"installLocation"`
 	}
 	if err := readJSON(filepath.Join(claude, "plugins", "known_marketplaces.json"), &known); err != nil {
 		return r, err
@@ -99,23 +97,17 @@ func FromClaude(home string) (ClaudeResult, error) {
 			r.Warnings = append(r.Warnings, fmt.Sprintf("skipped marketplace %q: unsupported source %q", mk, k.Source.Source))
 			continue
 		}
-		if m, err := marketplace.Load(k.InstallLocation); err != nil {
-			r.Warnings = append(r.Warnings, fmt.Sprintf("marketplace %q: cannot read its plugin list (%v); imported without per-plugin settings", mk, err))
-		} else {
-			for _, e := range m.Plugins {
-				if !active[e.Name+"@"+mk] {
-					if src.Plugins == nil {
-						src.Plugins = map[string]*config.Node{}
-					}
-					src.Plugins[e.Name] = &config.Node{Disabled: true}
-				}
-			}
-		}
+		// Only the plugins Claude Code has installed and enabled are on, also later upstream additions stay off.
+		src.PluginsDefault = config.PluginsDisabled
 		r.Sources[name] = src
 		var plugins []string
 		for key, on := range active {
 			if i := strings.LastIndex(key, "@"); on && i >= 0 && key[i+1:] == mk {
 				plugins = append(plugins, key)
+				if src.Plugins == nil {
+					src.Plugins = map[string]*config.Node{}
+				}
+				src.Plugins[key[:i]] = &config.Node{}
 			}
 		}
 		sort.Strings(plugins)

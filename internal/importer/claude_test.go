@@ -47,16 +47,21 @@ func TestFromClaude(t *testing.T) {
 	if alpha == nil || alpha.Type != "marketplace" || alpha.URL != "demo/alpha-plugins" {
 		t.Fatalf("alpha = %+v", alpha)
 	}
-	if alpha.Plugins["on-plugin"] != nil {
-		t.Errorf("on-plugin must stay enabled: %+v", alpha.Plugins["on-plugin"])
+	// Only what Claude Code has installed and enabled is on; plugins added upstream later stay off.
+	if alpha.PluginsDefault != config.PluginsDisabled || len(alpha.Plugins) != 1 {
+		t.Fatalf("alpha plugins = %q %+v", alpha.PluginsDefault, alpha.Plugins)
 	}
-	for _, p := range []string{"off-plugin", "proj-plugin", "missing-plugin"} {
-		if n := alpha.Plugins[p]; n == nil || !n.Disabled {
-			t.Errorf("%s should be disabled: %+v", p, n)
+	if n := alpha.Plugins["on-plugin"]; n == nil || n.Disabled {
+		t.Errorf("on-plugin must be explicitly enabled: %+v", n)
+	}
+	for _, p := range []string{"off-plugin", "proj-plugin", "missing-plugin", "added-later"} {
+		if alpha.PluginEnabled(p) {
+			t.Errorf("%s should be disabled", p)
 		}
 	}
 	beta := r.Sources["beta-local"]
-	if beta == nil || beta.Type != "marketplace" || beta.Path != "/demo/beta" || len(beta.Plugins) != 0 {
+	if beta == nil || beta.Type != "marketplace" || beta.Path != "/demo/beta" || beta.PluginsDefault != config.PluginsDisabled ||
+		len(beta.Plugins) != 1 || !beta.PluginEnabled("beta-tool") {
 		t.Fatalf("beta-local = %+v", beta)
 	}
 
@@ -86,11 +91,9 @@ func TestFromClaudeMissingMarketplaceJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s := r.Sources["alpha"]; s == nil || len(s.Plugins) != 0 {
+	// the enabled plugins come from Claude Code's settings, not from the plugin list
+	if s := r.Sources["alpha"]; s == nil || s.PluginsDefault != config.PluginsDisabled || !s.PluginEnabled("on-plugin") || s.PluginEnabled("off-plugin") {
 		t.Errorf("alpha = %+v", s)
-	}
-	if !strings.Contains(strings.Join(r.Warnings, "\n"), "alpha") {
-		t.Errorf("warnings = %v", r.Warnings)
 	}
 }
 

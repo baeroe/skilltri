@@ -594,3 +594,51 @@ func (sb *sandbox) writeConfigRaw(t *testing.T, content string) {
 		}
 	}
 }
+
+func TestSourceAddPlugins(t *testing.T) {
+	sb := newSandbox(t)
+	cfgDir := ""
+	for _, kv := range sb.env {
+		if v, ok := strings.CutPrefix(kv, "SKILLTRI_CONFIG_DIR="); ok {
+			cfgDir = v
+		}
+	}
+	run := func(args ...string) int {
+		c := exec.Command(skilltriBin, args...)
+		c.Env = sb.env
+		err := c.Run()
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			return exit.ExitCode()
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return 0
+	}
+	for _, tc := range []struct {
+		args []string
+		code int
+		want string
+	}{
+		{[]string{"source", "add", "marketplace", "on", "demo/on"}, 0, ""},
+		{[]string{"source", "add", "marketplace", "on2", "demo/on", "--plugins", "enabled"}, 0, ""},
+		{[]string{"source", "add", "marketplace", "off", "demo/off", "--plugins=disabled"}, 0, config.PluginsDisabled},
+		{[]string{"source", "add", "marketplace", "bad", "demo/bad", "--plugins", "some"}, 2, ""},
+		{[]string{"source", "add", "git", "g", "demo/g", "--plugins", "disabled"}, 2, ""},
+	} {
+		if code := run(tc.args...); code != tc.code {
+			t.Fatalf("%v: exit %d, want %d", tc.args, code, tc.code)
+		}
+		if tc.code != 0 {
+			continue
+		}
+		cfg, err := config.Load(filepath.Join(cfgDir, "config.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s := cfg.Sources[tc.args[3]]; s == nil || s.PluginsDefault != tc.want {
+			t.Fatalf("%v: source = %+v", tc.args, s)
+		}
+	}
+}
