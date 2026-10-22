@@ -15,9 +15,11 @@ import (
 
 // Result is the outcome of an import.
 type Result struct {
-	Servers  map[string]*config.Server
-	Secrets  map[string]string // secret name → value, referenced from Servers
-	Warnings []string
+	Servers map[string]*config.Server
+	Secrets map[string]string // secret name → value, referenced from Servers
+	// SecretsByServer lists, per server, the exact secret names it references.
+	SecretsByServer map[string][]string
+	Warnings        []string
 }
 
 type oneMCPServer struct {
@@ -47,7 +49,7 @@ func From1MCP(data []byte) (Result, error) {
 	if err := json.Unmarshal(data, &file); err != nil {
 		return Result{}, fmt.Errorf("parse 1MCP config: %w", err)
 	}
-	res := Result{Servers: map[string]*config.Server{}, Secrets: map[string]string{}}
+	res := Result{Servers: map[string]*config.Server{}, Secrets: map[string]string{}, SecretsByServer: map[string][]string{}}
 	names := make([]string, 0, len(file.MCPServers))
 	for n := range file.MCPServers {
 		names = append(names, n)
@@ -109,12 +111,25 @@ func (r *Result) warn(format string, args ...any) {
 	r.Warnings = append(r.Warnings, fmt.Sprintf(format, args...))
 }
 
-// secret stores value as <server>-<lowercased key> and returns the reference.
+// secret stores value as <server>-<lowercased key> and returns the reference. If that name is
+// taken by a different value, a numeric suffix (-2, -3, ...) disambiguates it.
 func (r *Result) secret(server, key, value string) string {
 	if value == "" {
 		return value
 	}
-	name := server + "-" + invalidSecretCh.ReplaceAllString(strings.ToLower(key), "-")
+	base := server + "-" + invalidSecretCh.ReplaceAllString(strings.ToLower(key), "-")
+	name := base
+	for i := 2; ; i++ {
+		existing, taken := r.Secrets[name]
+		if !taken || existing == value {
+			break
+		}
+		name = fmt.Sprintf("%s-%d", base, i)
+	}
+	if name != base {
+		r.warn("%q: secret name %q was taken, using %q", server, base, name)
+	}
 	r.Secrets[name] = value
+	r.SecretsByServer[server] = append(r.SecretsByServer[server], name)
 	return secrets.Ref(name)
 }

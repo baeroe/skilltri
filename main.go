@@ -6,12 +6,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"golang.org/x/term"
 
-	"github.com/baeroe/skilltri/internal/config"
 	"github.com/baeroe/skilltri/internal/importer"
 	"github.com/baeroe/skilltri/internal/paths"
 	"github.com/baeroe/skilltri/internal/secrets"
@@ -154,58 +152,5 @@ func runImport(args []string) int {
 		return 1
 	}
 
-	var imported []string
-	err = config.Update(paths.ConfigFile(), func(c *config.Config) error {
-		if c.Servers == nil {
-			c.Servers = map[string]*config.Server{}
-		}
-		names := make([]string, 0, len(res.Servers))
-		for n := range res.Servers {
-			names = append(names, n)
-		}
-		sort.Strings(names)
-		for _, n := range names {
-			if _, exists := c.Servers[n]; exists && !force {
-				res.Warnings = append(res.Warnings, fmt.Sprintf("skipped %q: already exists (use --force to overwrite)", n))
-				continue
-			}
-			c.Servers[n] = res.Servers[n]
-			imported = append(imported, n)
-		}
-		// Store only the secrets that imported servers reference.
-		for _, n := range imported {
-			for _, ref := range serverRefs(res.Servers[n]) {
-				name := strings.TrimSuffix(strings.TrimPrefix(ref, "${secret:"), "}")
-				if err := secrets.Set(name, res.Secrets[name]); err != nil {
-					return fmt.Errorf("store secret %s: %w", name, err)
-				}
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "skilltri: %v\n", err)
-		return 1
-	}
-	for _, n := range imported {
-		fmt.Printf("imported %s\n", n)
-	}
-	for _, w := range res.Warnings {
-		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
-	}
-	fmt.Printf("%d server(s) imported\n", len(imported))
-	return 0
-}
-
-// serverRefs returns the ${secret:NAME} references in a server's headers and env.
-func serverRefs(s *config.Server) []string {
-	var refs []string
-	for _, m := range []map[string]string{s.Headers, s.Env} {
-		for _, v := range m {
-			if strings.HasPrefix(v, "${secret:") {
-				refs = append(refs, v)
-			}
-		}
-	}
-	return refs
+	return importInto(paths.ConfigFile(), res, force, os.Stdout, os.Stderr)
 }

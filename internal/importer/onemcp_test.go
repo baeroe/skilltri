@@ -81,3 +81,38 @@ func TestFrom1MCPErrors(t *testing.T) {
 		t.Errorf("res = %+v", res)
 	}
 }
+
+func TestFrom1MCPSecretNameCollisions(t *testing.T) {
+	res, err := From1MCP([]byte(`{"mcpServers":{
+ "a":{"url":"https://x.example.com","headers":{"X-Key":"v1","x-key":"v2"}},
+ "b":{"url":"https://y.example.com","headers":{"c-k":"v3"}},
+ "b-c":{"url":"https://z.example.com","headers":{"k":"v4"}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Secrets) != 4 {
+		t.Fatalf("secrets = %v", res.Secrets)
+	}
+	seen := map[string]bool{}
+	for _, v := range res.Secrets {
+		seen[v] = true
+	}
+	for _, v := range []string{"v1", "v2", "v3", "v4"} {
+		if !seen[v] {
+			t.Errorf("value %s lost", v)
+		}
+	}
+	for _, names := range res.SecretsByServer {
+		for _, n := range names {
+			if _, ok := res.Secrets[n]; !ok {
+				t.Errorf("unknown name %s", n)
+			}
+		}
+	}
+	if strings.Contains(strings.Join(res.Warnings, "\n"), "v1") {
+		t.Error("warning leaks value")
+	}
+	if len(res.Warnings) < 2 {
+		t.Errorf("warnings = %v", res.Warnings)
+	}
+}
