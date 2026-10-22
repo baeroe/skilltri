@@ -681,7 +681,7 @@ func TestDisabledPluginsNeverFetched(t *testing.T) {
 func TestReviewStateCodeChange(t *testing.T) {
 	gitEnv(t)
 	plugin := gitRepo(t, map[string]string{
-		".mcp.json":  `{"local":{"command":"${CLAUDE_PLUGIN_ROOT}/bin/serve","args":["--demo"]},"remote":{"command":"demo-remote"}}`,
+		".mcp.json": `{"local":{"command":"${CLAUDE_PLUGIN_ROOT}/bin/serve","args":["--demo"]},"remote":{"command":"demo-remote"}}`,
 		"bin/serve": "#!/bin/sh\necho v1\n",
 	})
 	market := filepath.Join(t.TempDir(), "market")
