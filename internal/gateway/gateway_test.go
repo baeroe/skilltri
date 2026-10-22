@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -313,5 +314,44 @@ func TestSessionPromptsResources(t *testing.T) {
 	rr, err := h.cs.ReadResource(ctx, &mcp.ReadResourceParams{URI: uri})
 	if err != nil || rr.Contents[0].Text != "a:r" {
 		t.Fatalf("ReadResource = %+v, %v", rr, err)
+	}
+}
+
+func TestSessionRefreshDeadline(t *testing.T) {
+	p := t.TempDir()
+	slow := &config.Server{Type: "stdio", Command: "sh", Args: []string{"-c", "sleep 2; exec " + fakeBin},
+		Env: map[string]string{"FAKEMCP_NAME": "slow", "FAKEMCP_TOOLS": "s"}}
+	cfg := &config.Config{Version: 1, Servers: map[string]*config.Server{
+		"fast": stdio(map[string]string{"FAKEMCP_NAME": "fast", "FAKEMCP_TOOLS": "f"}),
+		"slow": slow,
+	}}
+	h := newHarness(t, &config.Config{Version: 1, Servers: map[string]*config.Server{}}, p)
+	h.cfg.Store(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if err := h.sess.Refresh(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("bounded Refresh = %v, want DeadlineExceeded", err)
+	}
+	if d := time.Since(start); d > 1500*time.Millisecond {
+		t.Fatalf("bounded Refresh took %v", d)
+	}
+	if got := h.tools(t); !slices.Equal(got, []string{"fast_f"}) {
+		t.Fatalf("tools after bounded Refresh = %v", got)
+	}
+	if err := h.sess.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.tools(t); !slices.Equal(got, []string{"fast_f", "slow_s"}) {
+		t.Fatalf("tools after full Refresh = %v", got)
+	}
+
+	// A Refresh cut short keeps the items of servers it could not finish.
+	done, cancelDone := context.WithCancel(context.Background())
+	cancelDone()
+	_ = h.sess.Refresh(done)
+	if got := h.tools(t); !slices.Equal(got, []string{"fast_f", "slow_s"}) {
+		t.Fatalf("tools after cancelled Refresh = %v", got)
 	}
 }

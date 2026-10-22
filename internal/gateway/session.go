@@ -18,6 +18,11 @@ import (
 // ErrSessionClosed is returned by Refresh after Close.
 var ErrSessionClosed = errors.New("gateway session closed")
 
+// protocolVersions are the versions sessions negotiate. 2026-07-28 is left out: it is sessionless
+// and forbids server-initiated roots/list, so server/discover is rejected and clients fall back to
+// initialize (CONCEPT.md "Spike results").
+var protocolVersions = []string{"2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"}
+
 // SessionInfo identifies a harness session. ID is also the downstream session ID.
 type SessionInfo struct {
 	ID         string
@@ -39,6 +44,7 @@ type Session struct {
 	tools     map[string]registered
 	prompts   map[string]registered
 	resources map[string]registered // by URI
+	last      *wanted               // what the last Refresh applied
 
 	mu     sync.Mutex
 	info   SessionInfo
@@ -68,12 +74,13 @@ func NewSession(info SessionInfo, cfg func() *config.Config, mgr *downstream.Man
 	s := &Session{
 		id: info.ID, cfg: cfg, mgr: mgr, info: info,
 		tools: map[string]registered{}, prompts: map[string]registered{}, resources: map[string]registered{},
-		active: map[string]bool{},
+		active: map[string]bool{}, last: newWanted(),
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.server = mcp.NewServer(&mcp.Implementation{Name: "skilltri", Version: Version}, &mcp.ServerOptions{
 		Instructions: fmt.Sprintf("skilltri gateway. Tools and prompts are named <server>_<name>. Servers active for %s: %s.", info.Dir, list),
 		HasTools:     true, HasPrompts: true, HasResources: true,
+		SupportedProtocolVersions: protocolVersions,
 	})
 	return s
 }
@@ -142,9 +149,10 @@ type wanted struct {
 type route struct{ server, name string }
 
 // Refresh recomputes the active servers from the current config and folder, lists them through
-// the manager and adds or removes tools, prompts and resources (the SDK sends list_changed).
-// Servers that fail to start or list are skipped and logged; Refresh fails only when ctx is done
-// or the session is closed.
+// the manager (in parallel) and adds or removes tools, prompts and resources (the SDK sends
+// list_changed). Servers that fail to start or list are skipped and logged. When ctx ends first,
+// the servers that finished are applied, the unfinished ones keep their current items, and
+// Refresh returns ctx's error; after Close it returns ErrSessionClosed.
 func (s *Session) Refresh(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -179,32 +187,81 @@ func (s *Session) Refresh(ctx context.Context) error {
 		s.mgr.Release(name, id)
 	}
 
-	w := wanted{
+	lists := make([]serverLists, len(names))
+	var wg sync.WaitGroup
+	for i, name := range names {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			lists[i] = s.fetch(ctx, name, id)
+		}()
+	}
+	wg.Wait() // every fetch honours ctx, so this returns soon after ctx ends
+
+	if s.ctx.Err() != nil {
+		return ErrSessionClosed
+	}
+	w := newWanted()
+	for i, name := range names { // sorted, so the first server by name wins a collision
+		l := lists[i]
+		switch {
+		case l.err == nil:
+			s.merge(cfg, name, dir, l, w)
+		case ctx.Err() != nil:
+			s.last.keep(name, w)
+		default:
+			slog.Warn("gateway: skipping server", "session", id, "server", name, "err", l.err)
+		}
+	}
+	s.apply(w)
+	s.last = w
+	return ctx.Err()
+}
+
+func newWanted() *wanted {
+	return &wanted{
 		tools: map[string]*mcp.Tool{}, toolSrc: map[string]route{},
 		prompts: map[string]*mcp.Prompt{}, promptSrc: map[string]route{},
 		resources: map[string]*mcp.Resource{}, resSrc: map[string]string{},
 	}
-	for _, name := range names { // sorted, so the first server by name wins a collision
-		if err := s.collect(ctx, cfg, name, id, dir, &w); err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			slog.Warn("gateway: skipping server", "session", id, "server", name, "err", err)
-		}
-	}
-	s.apply(&w)
-	return nil
 }
 
-// collect adds the active items of one server to w.
-func (s *Session) collect(ctx context.Context, cfg *config.Config, server, id, dir string, w *wanted) error {
+// keep copies server's items from w (the last applied set) into next.
+func (w *wanted) keep(server string, next *wanted) {
+	for name, rt := range w.toolSrc {
+		if _, dup := next.toolSrc[name]; rt.server == server && !dup {
+			next.tools[name], next.toolSrc[name] = w.tools[name], rt
+		}
+	}
+	for name, rt := range w.promptSrc {
+		if _, dup := next.promptSrc[name]; rt.server == server && !dup {
+			next.prompts[name], next.promptSrc[name] = w.prompts[name], rt
+		}
+	}
+	for uri, srv := range w.resSrc {
+		if _, dup := next.resSrc[uri]; srv == server && !dup {
+			next.resources[uri], next.resSrc[uri] = w.resources[uri], srv
+		}
+	}
+}
+
+// serverLists is what one server listed during a Refresh.
+type serverLists struct {
+	tools     []*mcp.Tool
+	prompts   []*mcp.Prompt
+	resources []*mcp.Resource
+	err       error
+}
+
+// fetch acquires server and lists its tools, prompts and resources.
+func (s *Session) fetch(ctx context.Context, server, id string) serverLists {
 	conn, err := s.mgr.Acquire(ctx, server, id)
 	if err != nil {
-		return err
+		return serverLists{err: err}
 	}
 	tools, err := conn.Tools(ctx)
 	if err != nil {
-		return err
+		return serverLists{err: err}
 	}
 	prompts, err := conn.Prompts(ctx)
 	if err != nil {
@@ -214,6 +271,12 @@ func (s *Session) collect(ctx context.Context, cfg *config.Config, server, id, d
 	if err != nil {
 		resources = nil
 	}
+	return serverLists{tools: tools, prompts: prompts, resources: resources}
+}
+
+// merge adds the active items of one server's lists to w.
+func (s *Session) merge(cfg *config.Config, server, dir string, l serverLists, w *wanted) {
+	tools, prompts, resources := l.tools, l.prompts, l.resources
 	for _, t := range tools {
 		if !ToolDecision(cfg, server, t.Name, dir).Active {
 			continue
@@ -244,7 +307,6 @@ func (s *Session) collect(ctx context.Context, cfg *config.Config, server, id, d
 		}
 		w.resources[r.URI], w.resSrc[r.URI] = r, server
 	}
-	return nil
 }
 
 // apply diffs w against the registered items and updates the mcp.Server. Called with refreshMu held.

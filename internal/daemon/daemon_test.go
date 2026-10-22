@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -42,6 +43,7 @@ const poll = 50 * time.Millisecond
 // env is a daemon's files in a short /tmp dir (macOS limits socket paths to 104 bytes).
 type env struct {
 	dir, cfg, sock, lock string
+	connectRefresh       time.Duration
 }
 
 func newEnv(t *testing.T) env {
@@ -55,7 +57,7 @@ func newEnv(t *testing.T) env {
 }
 
 func (e env) options() Options {
-	return Options{ConfigPath: e.cfg, SocketPath: e.sock, LockPath: e.lock, Version: "test", PollInterval: poll}
+	return Options{ConfigPath: e.cfg, SocketPath: e.sock, LockPath: e.lock, Version: "test", PollInterval: poll, ConnectRefresh: e.connectRefresh}
 }
 
 // writeConfig writes c as the config file and makes sure its mtime moves forward.
@@ -165,11 +167,8 @@ func (e env) connect(t *testing.T, h Hello, roots ...string) *client {
 	for _, r := range roots {
 		mc.AddRoots(&mcp.Root{URI: "file://" + r})
 	}
-	var so *mcp.ClientSessionOptions
-	if len(roots) > 0 { // roots/list needs the initialize protocol; 2026-07-28 forbids it
-		so = &mcp.ClientSessionOptions{ProtocolVersion: "2025-11-25"}
-	}
-	c.cs, err = mc.Connect(context.Background(), &mcp.IOTransport{Reader: conn, Writer: conn}, so)
+	// The client probes server/discover (2026-07-28) first and falls back to initialize.
+	c.cs, err = mc.Connect(context.Background(), &mcp.IOTransport{Reader: conn, Writer: conn}, nil)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -430,5 +429,151 @@ func TestControlStatusWhich(t *testing.T) {
 
 	if err := Control(e.sock, Hello{Kind: "control", Cmd: "nope"}, &w); err == nil {
 		t.Fatal("unknown control command succeeded")
+	}
+}
+
+func TestSlowServerDoesNotBlockInitialize(t *testing.T) {
+	e := newEnv(t)
+	e.connectRefresh = time.Second
+	p, _ := projectDirs(t)
+	slow := &config.Server{Type: "stdio", Command: "sh", Args: []string{"-c", "sleep 3; exec " + fakeBin},
+		Env: map[string]string{"FAKEMCP_NAME": "slow", "FAKEMCP_TOOLS": "s"}}
+	e.writeConfig(t, cfgOf(map[string]*config.Server{"fast": fake("fast", "f"), "slow": slow}))
+	e.start(t)
+
+	start := time.Now()
+	c := e.connect(t, Hello{Dir: p})
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("initialize took %v with a slow server", d)
+	}
+	if got := c.tools(t); !slices.Equal(got, []string{"fast_f"}) {
+		t.Fatalf("tools at connect = %v", got)
+	}
+	select {
+	case <-c.changed:
+	case <-time.After(8 * time.Second):
+		t.Fatal("slow server's tools never announced")
+	}
+	if got := c.tools(t); !slices.Equal(got, []string{"fast_f", "slow_s"}) {
+		t.Fatalf("tools later = %v", got)
+	}
+}
+
+// raw is a socket connection driven by hand, one JSON line at a time.
+type raw struct {
+	conn net.Conn
+	r    *bufio.Reader
+}
+
+func (e env) dialRaw(t *testing.T) *raw {
+	t.Helper()
+	conn, err := net.Dial("unix", e.sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	return &raw{conn: conn, r: bufio.NewReader(conn)}
+}
+
+func (r *raw) send(t *testing.T, lines ...string) {
+	t.Helper()
+	if _, err := r.conn.Write([]byte(strings.Join(lines, "\n") + "\n")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (r *raw) recv(t *testing.T, v any) {
+	t.Helper()
+	line, err := r.r.ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if err := json.Unmarshal(line, v); err != nil {
+		t.Fatalf("parse %q: %v", line, err)
+	}
+}
+
+type rpcReply struct {
+	ID     string `json:"id"`
+	Result *struct {
+		ProtocolVersion string `json:"protocolVersion"`
+	} `json:"result"`
+	Error *struct {
+		Code int `json:"code"`
+	} `json:"error"`
+}
+
+const (
+	sessionHello = `{"v":1,"kind":"session","dir":"/"}`
+	initialize   = `{"jsonrpc":"2.0","id":"i1","method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"raw","version":"0"}}}`
+)
+
+func TestDiscoverRejected(t *testing.T) {
+	e := newEnv(t)
+	e.start(t)
+	r := e.dialRaw(t)
+	r.send(t, sessionHello)
+	r.send(t, `{"jsonrpc":"2.0","id":"p1","method":"server/discover","params":{}}`)
+	var rep rpcReply
+	r.recv(t, &rep)
+	if rep.ID != "p1" || rep.Error == nil || rep.Error.Code != -32601 {
+		t.Fatalf("server/discover reply = %+v, want error -32601", rep)
+	}
+	r.send(t, initialize)
+	rep = rpcReply{}
+	r.recv(t, &rep)
+	if rep.ID != "i1" || rep.Error != nil || rep.Result == nil || rep.Result.ProtocolVersion != "2025-11-25" {
+		t.Fatalf("initialize reply = %+v", rep)
+	}
+}
+
+func TestHelloAndInitializeInOneWrite(t *testing.T) {
+	e := newEnv(t)
+	e.start(t)
+	r := e.dialRaw(t)
+	r.send(t, sessionHello, initialize)
+	var rep rpcReply
+	r.recv(t, &rep)
+	if rep.ID != "i1" || rep.Result == nil || rep.Result.ProtocolVersion != "2025-11-25" {
+		t.Fatalf("initialize reply = %+v", rep)
+	}
+}
+
+func TestBadHelloVersion(t *testing.T) {
+	e := newEnv(t)
+	e.start(t)
+	r := e.dialRaw(t)
+	r.send(t, `{"v":2,"kind":"session"}`)
+	var resp struct{ Error string }
+	r.recv(t, &resp)
+	if !strings.Contains(resp.Error, "hello version 2") {
+		t.Fatalf("reply = %+v", resp)
+	}
+}
+
+func TestShutdownWithPendingHello(t *testing.T) {
+	e := newEnv(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- New(e.options()).Run(ctx) }()
+	eventually(t, 5*time.Second, "daemon up", func() bool {
+		return Control(e.sock, Hello{Cmd: "status"}, nil) == nil
+	})
+	conn, err := net.Dial("unix", e.sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	time.Sleep(50 * time.Millisecond) // let the daemon accept it
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run waited for a connection that never sent its hello")
 	}
 }

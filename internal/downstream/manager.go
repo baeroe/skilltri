@@ -139,11 +139,12 @@ func (m *Manager) Acquire(ctx context.Context, server, sessionID string) (*Conn,
 	}
 	m.mu.Unlock()
 
-	err := ctx.Err()
+	var err error
 	select {
 	case <-in.done:
 		err = in.err
 	case <-ctx.Done():
+		err = ctx.Err()
 	}
 	if err != nil {
 		if !claimed { // a failed first Acquire leaves no claim behind

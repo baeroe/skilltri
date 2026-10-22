@@ -36,6 +36,10 @@ const (
 	defaultIdleTimeout   = 600 * time.Second
 	helloTimeout         = 10 * time.Second // a client must send its hello within this time
 	rootsTimeout         = 10 * time.Second
+	// defaultConnectRefresh bounds the Refresh before a session answers initialize; servers
+	// still starting then arrive via list_changed, so a slow server never hits the harness's
+	// connect timeout.
+	defaultConnectRefresh = 3 * time.Second
 )
 
 // Options configure a Daemon.
@@ -45,6 +49,7 @@ type Options struct {
 	Logger                           *log.Logger   // nil: discard
 	PollInterval                     time.Duration // config file check; 0 → 1s
 	RetryInterval                    time.Duration // re-Refresh of all sessions so failed servers reappear; 0 → 30s
+	ConnectRefresh                   time.Duration // bound of the Refresh before initialize; 0 → 3s
 }
 
 // Daemon serves sessions and control requests. Create it with New and start it with Run.
@@ -65,15 +70,19 @@ type Daemon struct {
 // session is one harness connection.
 type session struct {
 	gw     *gateway.Session
-	ss     *mcp.ServerSession // set after Connect, guarded by Daemon.mu
-	client string             // clientInfo.name from initialize, guarded by Daemon.mu
-	kick   chan struct{}      // buffered 1: a Refresh is wanted
+	ss     *mcp.ServerSession      // set after Connect, guarded by Daemon.mu
+	client string                  // clientInfo.name from initialize, guarded by Daemon.mu
+	kick   chan struct{}           // buffered 1: a Refresh is wanted
+	roots  chan *mcp.ServerSession // buffered 1: the client's roots should be (re)read
 }
 
 // New returns a daemon for o; nothing happens until Run.
 func New(o Options) *Daemon {
 	if o.PollInterval <= 0 {
 		o.PollInterval = defaultPollInterval
+	}
+	if o.ConnectRefresh <= 0 {
+		o.ConnectRefresh = defaultConnectRefresh
 	}
 	if o.RetryInterval <= 0 {
 		o.RetryInterval = defaultRetryInterval
@@ -198,18 +207,21 @@ func (d *Daemon) accept(ln net.Listener) {
 
 // handle reads the hello and dispatches the connection.
 func (d *Daemon) handle(conn net.Conn) {
+	stop := context.AfterFunc(d.ctx, func() { conn.Close() }) // shutdown while the hello is pending
 	br := bufio.NewReaderSize(conn, maxHello)
 	_ = conn.SetReadDeadline(time.Now().Add(helloTimeout))
 	h, err := readHello(br)
 	_ = conn.SetReadDeadline(time.Time{})
-	if h.Kind == "control" || (err != nil && h.Kind != "session") {
-		d.control(conn, h, err)
+	if err != nil || h.Kind == "control" {
+		defer stop()
+		if err != nil {
+			d.log.Printf("hello: %v", err)
+		}
+		d.control(conn, h, err) // a bad hello gets a one-line JSON error
 		return
 	}
-	if err != nil {
-		d.log.Printf("session hello: %v", err)
-		conn.Close()
-		return
+	if !stop() {
+		return // the daemon is stopping and closed conn
 	}
 	d.serveSession(conn, br, h)
 }
@@ -218,7 +230,7 @@ func (d *Daemon) handle(conn net.Conn) {
 func (d *Daemon) serveSession(conn net.Conn, br *bufio.Reader, h Hello) {
 	id := newID()
 	gw := gateway.NewSession(gateway.SessionInfo{ID: id, Dir: h.Dir}, d.cfg.Load, d.mgr)
-	s := &session{gw: gw, kick: make(chan struct{}, 1)}
+	s := &session{gw: gw, kick: make(chan struct{}, 1), roots: make(chan *mcp.ServerSession, 1)}
 	gw.MCPServer().AddReceivingMiddleware(d.initMiddleware(s, h.DirExplicit))
 	if !d.register(id, s) {
 		gw.Close()
@@ -228,7 +240,19 @@ func (d *Daemon) serveSession(conn net.Conn, br *bufio.Reader, h Hello) {
 	defer d.unregister(id)
 	defer gw.Close()
 
-	if err := gw.Refresh(d.ctx); err != nil { // before Connect, so the first tools/list is complete
+	// Before Connect, so the first tools/list has every server that starts quickly.
+	ctx, cancel := context.WithTimeout(d.ctx, d.o.ConnectRefresh)
+	err := gw.Refresh(ctx)
+	cancel()
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		d.log.Printf("session %s: servers still starting after %s, they follow via list_changed", id, d.o.ConnectRefresh)
+		select { // the worker below finishes the Refresh
+		case s.kick <- struct{}{}:
+		default: // a reload already asked for one
+		}
+	case err != nil:
+		d.log.Printf("session %s: refresh: %v", id, err)
 		conn.Close()
 		return
 	}
@@ -249,7 +273,7 @@ func (d *Daemon) serveSession(conn net.Conn, br *bufio.Reader, h Hello) {
 
 	done := make(chan struct{})
 	d.wg.Add(1)
-	go func() { // serialized refreshes requested by reloads, list changes and retries
+	go func() { // serializes refreshes (reloads, list changes, retries) and roots lookups
 		defer d.wg.Done()
 		for {
 			select {
@@ -257,6 +281,8 @@ func (d *Daemon) serveSession(conn net.Conn, br *bufio.Reader, h Hello) {
 				if err := gw.Refresh(d.ctx); err != nil && !errors.Is(err, gateway.ErrSessionClosed) && d.ctx.Err() == nil {
 					d.log.Printf("session %s: refresh: %v", id, err)
 				}
+			case ss := <-s.roots:
+				d.followRoots(s, ss)
 			case <-done:
 				return
 			}
@@ -283,13 +309,8 @@ func (d *Daemon) unregister(id string) {
 	d.mu.Unlock()
 }
 
-// newProtocol is the first protocol version without initialize; it forbids server-initiated
-// roots/list (SEP-2322), so sessions on it keep the hello folder.
-const newProtocol = "2026-07-28"
-
-// initMiddleware records the client name (from initialize, or from the request _meta on the
-// sessionless protocol) and, unless the folder is explicit, follows the client's roots on
-// initialized and on roots/list_changed.
+// initMiddleware records the client name from initialize and, unless the folder is explicit,
+// asks the session worker to follow the client's roots on initialized and on roots/list_changed.
 func (d *Daemon) initMiddleware(s *session, explicit bool) mcp.Middleware {
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
@@ -303,18 +324,16 @@ func (d *Daemon) initMiddleware(s *session, explicit bool) mcp.Middleware {
 				return res, err
 			}
 			d.mu.Lock()
-			defer d.mu.Unlock()
 			if s.client == "" && p.ClientInfo != nil {
 				s.client = p.ClientInfo.Name
 			}
+			d.mu.Unlock()
 			roots := method == "notifications/initialized" || method == "notifications/roots/list_changed"
-			if err == nil && roots && !explicit && !d.closing && p.ProtocolVersion < newProtocol &&
-				p.Capabilities != nil && p.Capabilities.RootsV2 != nil {
-				d.wg.Add(1)
-				go func() {
-					defer d.wg.Done()
-					d.followRoots(s, ss)
-				}()
+			if err == nil && roots && !explicit && p.Capabilities != nil && p.Capabilities.RootsV2 != nil {
+				select {
+				case s.roots <- ss:
+				default: // a lookup is already pending; it reads the newest roots
+				}
 			}
 			return res, err
 		}
