@@ -45,6 +45,17 @@ type PluginServer struct {
 	DefHash string        `json:"defHash"`
 }
 
+// PluginInfo is one plugin entry of an enabled marketplace source, also when it is disabled or not
+// fetched. Plugin is the entry name; Name (the plugin.json name) and Extras (what skilltri does not
+// deliver, see marketplace.Plugin.Extras) are known only once its folder was read (Loaded).
+type PluginInfo struct {
+	Source string   `json:"source"`
+	Plugin string   `json:"plugin"`
+	Name   string   `json:"name,omitempty"`
+	Loaded bool     `json:"loaded,omitempty"`
+	Extras []string `json:"extras,omitempty"`
+}
+
 // SourceState is the fetch state of a source or of a remote plugin ("<source>/plugins/<entry>").
 // Commit is the checkout in use (the last good one after a failed update).
 type SourceState struct {
@@ -55,10 +66,11 @@ type SourceState struct {
 }
 
 // Catalog is the content of catalog.json. Skills are sorted by ID, Servers by source, plugin and
-// name, Sources by name, so an unchanged build differs only in Built.
+// name, Plugins by source and entry name, Sources by name, so an unchanged build differs only in Built.
 type Catalog struct {
 	Skills   []Entry        `json:"skills"`
 	Servers  []PluginServer `json:"servers"`
+	Plugins  []PluginInfo   `json:"plugins,omitempty"`
 	Sources  []SourceState  `json:"sources"`
 	Warnings []string       `json:"warnings"`
 	Built    time.Time      `json:"built"`
@@ -316,6 +328,8 @@ func (b *Builder) assemble(cfg *config.Config, lock *skilllock.Lock) (*Catalog, 
 		entries := append([]marketplace.Entry(nil), m.Plugins...)
 		sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
 		for _, e := range entries {
+			c.Plugins = append(c.Plugins, PluginInfo{Source: name, Plugin: e.Name})
+			pi := len(c.Plugins) - 1
 			local, remote, err := marketplace.ParseSource(e.Source)
 			if err != nil {
 				warn("plugin %s: %v", e.Name, err)
@@ -362,6 +376,7 @@ func (b *Builder) assemble(cfg *config.Config, lock *skilllock.Lock) (*Catalog, 
 				warn("plugin %s ignored: %v", e.Name, err)
 				continue
 			}
+			c.Plugins[pi].Name, c.Plugins[pi].Loaded, c.Plugins[pi].Extras = p.Name, true, p.Extras
 			for _, sn := range sortedKeys(p.Servers) {
 				def := p.Servers[sn]
 				c.Servers = append(c.Servers, PluginServer{Source: name, Plugin: e.Name, Name: sn, Def: def, DefHash: DefHash(def)})
@@ -393,6 +408,12 @@ func (b *Builder) assemble(cfg *config.Config, lock *skilllock.Lock) (*Catalog, 
 			return a.Plugin < b.Plugin
 		}
 		return a.Name < b.Name
+	})
+	sort.Slice(c.Plugins, func(i, j int) bool {
+		if c.Plugins[i].Source != c.Plugins[j].Source {
+			return c.Plugins[i].Source < c.Plugins[j].Source
+		}
+		return c.Plugins[i].Plugin < c.Plugins[j].Plugin
 	})
 	sort.Slice(c.Sources, func(i, j int) bool { return c.Sources[i].Name < c.Sources[j].Name })
 	return c, keys

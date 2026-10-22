@@ -229,6 +229,9 @@ func checkDuplicates(_ context.Context, s *state) []Finding {
 			}
 		}
 	}
+	if s.cat == nil {
+		return out
+	}
 	var settings struct {
 		Enabled map[string]bool `json:"enabledPlugins"`
 	}
@@ -240,18 +243,43 @@ func checkDuplicates(_ context.Context, s *state) []Finding {
 			}
 			plugin, mk := key[:i], invalidSourceChars.ReplaceAllString(key[i+1:], "-")
 			src := s.cfg.Sources[mk]
-			if src == nil || src.Type != "marketplace" || src.Disabled {
+			if src == nil || src.Type != "marketplace" || src.Disabled || !src.PluginEnabled(plugin) {
 				continue
 			}
-			if !src.PluginEnabled(plugin) {
+			// Only skills are duplicated: a plugin without skills in the catalog is left alone, since
+			// uninstalling it would only lose what skilltri does not deliver.
+			if !slices.ContainsFunc(s.cat.Skills, func(e catalog.Entry) bool { return e.Source == mk && e.Plugin == plugin }) {
 				continue
 			}
-			out = append(out, Finding{Severity: Warning, Check: "duplicates", Subject: key,
-				Message: "Claude Code has plugin " + key + " enabled itself, and skilltri delivers it from source " + mk,
-				Fix:     "claude plugin uninstall " + key})
+			f := Finding{Severity: Warning, Check: "duplicates", Subject: key,
+				Message: "Claude Code has plugin " + key + " enabled itself, and skilltri delivers its skills from source " + mk,
+				Fix:     "claude plugin uninstall " + key}
+			if extras := pluginExtras(s.cat, mk, plugin); len(extras) > 0 {
+				f.Message += "; its " + joinAnd(extras) + " are not delivered by skilltri, uninstalling loses them"
+				f.Fix += " (only if you do not need its " + joinAnd(extras) + ")"
+			}
+			out = append(out, f)
 		}
 	}
 	return out
+}
+
+// pluginExtras returns what the catalog knows the plugin holds beyond skills and MCP servers.
+func pluginExtras(c *catalog.Catalog, source, plugin string) []string {
+	for _, p := range c.Plugins {
+		if p.Source == source && p.Plugin == plugin {
+			return p.Extras
+		}
+	}
+	return nil
+}
+
+// joinAnd joins items as "a", "a and b", "a, b and c".
+func joinAnd(items []string) string {
+	if len(items) < 2 {
+		return strings.Join(items, "")
+	}
+	return strings.Join(items[:len(items)-1], ", ") + " and " + items[len(items)-1]
 }
 
 func checkPluginServers(_ context.Context, s *state) []Finding {

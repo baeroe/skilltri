@@ -187,6 +187,14 @@ func TestBuildLocalGitMarketplace(t *testing.T) {
 	if want := []string{"loc", "market", "market/plugins/remote-one", "repo"}; !slices.Equal(states, want) {
 		t.Fatalf("sources = %v, want %v", states, want)
 	}
+	wantPlugins := []PluginInfo{
+		{Source: "market", Plugin: "pkg"},
+		{Source: "market", Plugin: "remote-one", Name: "remote-one", Loaded: true},
+		{Source: "market", Plugin: "writing", Name: "writing-tools", Loaded: true},
+	}
+	if !reflect.DeepEqual(c.Plugins, wantPlugins) {
+		t.Fatalf("plugins = %+v, want %+v", c.Plugins, wantPlugins)
+	}
 	if !slices.ContainsFunc(c.Warnings, func(w string) bool { return strings.Contains(w, "unsupported plugin source npm") }) {
 		t.Errorf("npm warning missing: %v", c.Warnings)
 	}

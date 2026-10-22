@@ -1,1 +1,1 @@
-{"model": "demo", "enabledPlugins": {"on-plugin@alpha": true, "off-plugin@alpha": false, "proj-plugin@alpha": true, "beta-tool@beta.local": true}}
+{"model": "demo", "enabledPlugins": {"on-plugin@alpha": true, "off-plugin@alpha": false, "proj-plugin@alpha": true, "lsp-only@alpha": true, "unread@alpha": true, "beta-tool@beta.local": true}}

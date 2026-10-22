@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -48,7 +49,7 @@ func TestFromClaude(t *testing.T) {
 		t.Fatalf("alpha = %+v", alpha)
 	}
 	// Only what Claude Code has installed and enabled is on; plugins added upstream later stay off.
-	if alpha.PluginsDefault != config.PluginsDisabled || len(alpha.Plugins) != 1 {
+	if alpha.PluginsDefault != config.PluginsDisabled || len(alpha.Plugins) != 3 { // on-plugin, lsp-only, unread
 		t.Fatalf("alpha plugins = %q %+v", alpha.PluginsDefault, alpha.Plugins)
 	}
 	if n := alpha.Plugins["on-plugin"]; n == nil || n.Disabled {
@@ -68,11 +69,12 @@ func TestFromClaude(t *testing.T) {
 	if len(r.UserSkills) != 1 || filepath.Base(r.UserSkills[0]) != "demo-skill" {
 		t.Errorf("UserSkills = %v", r.UserSkills)
 	}
-	if got := r.Uninstall["alpha"]; len(got) != 1 || got[0] != "on-plugin@alpha" {
-		t.Errorf("Uninstall[alpha] = %v", got)
+	// lsp-only has no skills: no uninstall advice; unread has no readable install folder
+	if got, want := r.Uninstall["alpha"], []PluginUninstall{{Key: "on-plugin@alpha"}, {Key: "unread@alpha", Unknown: true}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Uninstall[alpha] = %+v, want %+v", got, want)
 	}
-	if got := r.Uninstall["beta-local"]; len(got) != 1 || got[0] != "beta-tool@beta.local" {
-		t.Errorf("Uninstall[beta-local] = %v", got)
+	if got, want := r.Uninstall["beta-local"], []PluginUninstall{{Key: "beta-tool@beta.local", Extras: []string{"hooks"}}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("Uninstall[beta-local] = %+v, want %+v", got, want)
 	}
 	if !strings.Contains(strings.Join(r.Steps, "\n"), "skilltri plugin-server list") {
 		t.Errorf("steps = %v", r.Steps)
@@ -163,7 +165,8 @@ func TestApplyClaude(t *testing.T) {
 	}
 	text := out.String()
 	for _, want := range []string{"imported source beta-local", `skipped source "alpha"`, "copied skill demo-skill", "Next steps",
-		"claude plugin uninstall beta-tool@beta.local", "remove " + filepath.Join(home, ".claude", "skills", "demo-skill")} {
+		"claude plugin uninstall beta-tool@beta.local (only if you do not need its hooks: skilltri does not deliver them, uninstalling loses them)",
+		"remove " + filepath.Join(home, ".claude", "skills", "demo-skill")} {
 		if !strings.Contains(text, want) {
 			t.Errorf("output lacks %q:\n%s", want, text)
 		}
@@ -192,6 +195,14 @@ func TestApplyClaude(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(filepath.Join(skillsDir, "demo-skill/SKILL.md")); string(b) == "edited" {
 		t.Error("--force did not overwrite")
+	}
+	for _, want := range []string{"\n  - claude plugin uninstall on-plugin@alpha\n", "claude plugin uninstall unread@alpha (after checking"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("--force output lacks %q:\n%s", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "lsp-only") {
+		t.Errorf("uninstall advice for a plugin without skills:\n%s", out.String())
 	}
 	cfg, _ = config.Load(cfgPath)
 	if cfg.Sources["alpha"].URL != "demo/alpha-plugins" {

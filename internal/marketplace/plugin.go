@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/baeroe/skilltri/internal/config"
+	"github.com/baeroe/skilltri/internal/skills"
 )
 
 // Plugin is a plugin checked out in Dir.
@@ -19,6 +20,44 @@ type Plugin struct {
 	Dir        string
 	SkillRoots []string                 // Dir/skills plus extra `skills` paths from plugin.json and the entry
 	Servers    map[string]config.Server // from Dir/.mcp.json and plugin.json mcpServers; ${CLAUDE_PLUGIN_ROOT} replaced with Dir
+	// Extras is what the plugin holds that skilltri does not deliver, sorted: "LSP servers",
+	// "agents", "commands", "hooks" (from the folders, .lsp.json or the plugin.json fields).
+	Extras []string
+}
+
+// HasSkills reports whether any skill root holds at least one SKILL.md.
+func (p Plugin) HasSkills() bool {
+	for _, r := range p.SkillRoots {
+		if found, _ := skills.Discover(r); len(found) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// extras lists the parts of the plugin in dir skilltri does not deliver; manifest holds the
+// plugin.json fields that can declare them.
+func extras(dir string, manifest map[string]json.RawMessage) []string {
+	declared := func(field string) bool {
+		v := manifest[field]
+		return len(v) > 0 && string(v) != "null" && string(v) != "[]" && string(v) != "{}" && string(v) != `""`
+	}
+	exists := func(rel string) bool {
+		_, err := os.Stat(filepath.Join(dir, rel))
+		return err == nil
+	}
+	var out []string
+	for _, k := range []struct{ name, path, field string }{
+		{"LSP servers", ".lsp.json", "lspServers"},
+		{"agents", "agents", "agents"},
+		{"commands", "commands", "commands"},
+		{"hooks", "hooks", "hooks"},
+	} {
+		if exists(k.path) || declared(k.field) {
+			out = append(out, k.name)
+		}
+	}
+	return out
 }
 
 // LoadPlugin reads the plugin in dir. Servers are merged in the order
@@ -34,14 +73,17 @@ func LoadPlugin(entry Entry, dir string) (Plugin, []string, error) {
 		Skills     json.RawMessage `json:"skills"`
 		MCPServers json.RawMessage `json:"mcpServers"`
 	}
+	var fields map[string]json.RawMessage
 	mf := filepath.Join(dir, ".claude-plugin", "plugin.json")
 	if b, err := os.ReadFile(mf); err == nil {
 		if err := json.Unmarshal(b, &manifest); err != nil {
 			return p, nil, fmt.Errorf("parse %s: %w", mf, err)
 		}
+		_ = json.Unmarshal(b, &fields) // an object, as the line above checked
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return p, nil, err
 	}
+	p.Extras = extras(dir, fields)
 	if manifest.Name != "" {
 		p.Name = manifest.Name
 	}

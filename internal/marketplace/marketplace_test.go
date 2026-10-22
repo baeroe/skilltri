@@ -232,3 +232,48 @@ func TestLoadRejectsBadEntries(t *testing.T) {
 		}
 	}
 }
+
+func TestPluginExtrasAndSkills(t *testing.T) {
+	mk := func(files map[string]string) string {
+		t.Helper()
+		dir := t.TempDir()
+		for rel, s := range files {
+			p := filepath.Join(dir, rel)
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte(s), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return dir
+	}
+	skill := "---\nname: s\ndescription: Demo.\n---\n"
+	for _, tc := range []struct {
+		name   string
+		files  map[string]string
+		extras []string
+		skills bool
+	}{
+		{"skills only", map[string]string{"skills/s/SKILL.md": skill}, nil, true},
+		{"lsp only", map[string]string{".lsp.json": `{"go":{"command":"gopls"}}`}, []string{"LSP servers"}, false},
+		{"folders", map[string]string{"hooks/hooks.json": "{}", "agents/a.md": "a", "commands/c.md": "c", "skills/s/SKILL.md": skill},
+			[]string{"agents", "commands", "hooks"}, true},
+		{"manifest fields", map[string]string{".claude-plugin/plugin.json": `{"name":"m","hooks":"./h.json","lspServers":{"x":{}},"commands":["./c"]}`},
+			[]string{"LSP servers", "commands", "hooks"}, false},
+		{"empty skills folder", map[string]string{"skills/readme.txt": "x"}, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, _, err := LoadPlugin(Entry{Name: "demo"}, mk(tc.files))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Join(p.Extras, ",") != strings.Join(tc.extras, ",") {
+				t.Errorf("extras = %q, want %q", p.Extras, tc.extras)
+			}
+			if p.HasSkills() != tc.skills {
+				t.Errorf("HasSkills = %v", p.HasSkills())
+			}
+		})
+	}
+}

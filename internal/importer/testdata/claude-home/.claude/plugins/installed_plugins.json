@@ -1,9 +1,11 @@
 {
   "version": 2,
   "plugins": {
-    "on-plugin@alpha": [{"scope": "user", "installPath": "/x", "version": "1.0.0"}],
-    "off-plugin@alpha": [{"scope": "user", "installPath": "/x", "version": "1.0.0"}],
-    "proj-plugin@alpha": [{"scope": "project", "installPath": "/x", "version": "1.0.0"}],
-    "beta-tool@beta.local": [{"scope": "user", "installPath": "/x", "version": "1.0.0"}]
+    "on-plugin@alpha": [{"scope": "user", "installPath": "@HOME@/.claude/plugins/cache/alpha/on-plugin/1.0.0", "version": "1.0.0"}],
+    "off-plugin@alpha": [{"scope": "user", "installPath": "@HOME@/.claude/plugins/cache/alpha/off-plugin/1.0.0", "version": "1.0.0"}],
+    "proj-plugin@alpha": [{"scope": "project", "installPath": "@HOME@/.claude/plugins/cache/alpha/proj-plugin/1.0.0", "version": "1.0.0"}],
+    "lsp-only@alpha": [{"scope": "user", "installPath": "@HOME@/.claude/plugins/cache/alpha/lsp-only/1.0.0", "version": "1.0.0"}],
+    "unread@alpha": [{"scope": "user", "installPath": "@HOME@/.claude/plugins/cache/alpha/unread/1.0.0", "version": "1.0.0"}],
+    "beta-tool@beta.local": [{"scope": "user", "installPath": "@HOME@/.claude/plugins/cache/beta.local/beta-tool/1.0.0", "version": "1.0.0"}]
   }
 }

@@ -13,16 +13,45 @@ import (
 	"strings"
 
 	"github.com/baeroe/skilltri/internal/config"
+	"github.com/baeroe/skilltri/internal/marketplace"
 )
 
 // ClaudeResult is what FromClaude found in a Claude Code home.
 type ClaudeResult struct {
-	Sources    map[string]*config.Source // marketplace sources by (sanitized) name
-	UserSkills []string                  // absolute paths of user skill folders to copy
-	Steps      []string                  // static manual follow-ups to print; never executed
-	Uninstall  map[string][]string       // source name → "plugin@marketplace" keys Claude Code still has enabled
-	Home       string                    // the Claude home that was read, for the remove steps
+	Sources    map[string]*config.Source    // marketplace sources by (sanitized) name
+	UserSkills []string                     // absolute paths of user skill folders to copy
+	Steps      []string                     // static manual follow-ups to print; never executed
+	Uninstall  map[string][]PluginUninstall // source name → enabled Claude Code plugins whose skills skilltri now delivers
+	Home       string                       // the Claude home that was read, for the remove steps
 	Warnings   []string
+}
+
+// PluginUninstall is a plugin Claude Code still has enabled and that has skills skilltri now
+// delivers. Plugins without skills get none: uninstalling them would only lose what they have.
+type PluginUninstall struct {
+	Key     string   // "plugin@marketplace"
+	Extras  []string // what it holds that skilltri does not deliver (marketplace.Plugin.Extras)
+	Unknown bool     // its install folder could not be read
+}
+
+// Step is the manual follow-up for p.
+func (p PluginUninstall) Step() string {
+	step := "claude plugin uninstall " + p.Key
+	switch {
+	case p.Unknown:
+		step += " (after checking that it holds only skills and MCP servers: its install folder could not be read)"
+	case len(p.Extras) > 0:
+		step += " (only if you do not need its " + joinAnd(p.Extras) + ": skilltri does not deliver them, uninstalling loses them)"
+	}
+	return step
+}
+
+// joinAnd joins items as "a", "a and b", "a, b and c".
+func joinAnd(items []string) string {
+	if len(items) < 2 {
+		return strings.Join(items, "")
+	}
+	return strings.Join(items[:len(items)-1], ", ") + " and " + items[len(items)-1]
 }
 
 var invalidSourceChars = regexp.MustCompile(`[^A-Za-z0-9-]`)
@@ -30,7 +59,7 @@ var invalidSourceChars = regexp.MustCompile(`[^A-Za-z0-9-]`)
 // FromClaude reads home/.claude (marketplaces, installed and enabled plugins, user skills).
 // It only reads; missing files simply yield nothing.
 func FromClaude(home string) (ClaudeResult, error) {
-	r := ClaudeResult{Sources: map[string]*config.Source{}, Uninstall: map[string][]string{}, Home: home}
+	r := ClaudeResult{Sources: map[string]*config.Source{}, Uninstall: map[string][]PluginUninstall{}, Home: home}
 	claude := filepath.Join(home, ".claude")
 
 	var known map[string]struct {
@@ -59,9 +88,12 @@ func FromClaude(home string) (ClaudeResult, error) {
 
 	// active = installed for the user and enabled
 	active := map[string]bool{}
+	installPath := map[string]string{}
 	for key, raw := range installedFile.Plugins {
 		scopes := pluginScopes(raw)
-		if !scopes["user"] {
+		if p, ok := scopes["user"]; ok {
+			installPath[key] = p
+		} else {
 			r.Warnings = append(r.Warnings, fmt.Sprintf("plugin %s is not installed for the user scope; treated as not installed", key))
 			continue
 		}
@@ -100,17 +132,28 @@ func FromClaude(home string) (ClaudeResult, error) {
 		// Only the plugins Claude Code has installed and enabled are on, also later upstream additions stay off.
 		src.PluginsDefault = config.PluginsDisabled
 		r.Sources[name] = src
-		var plugins []string
+		var keys []string
 		for key, on := range active {
 			if i := strings.LastIndex(key, "@"); on && i >= 0 && key[i+1:] == mk {
-				plugins = append(plugins, key)
+				keys = append(keys, key)
 				if src.Plugins == nil {
 					src.Plugins = map[string]*config.Node{}
 				}
 				src.Plugins[key[:i]] = &config.Node{}
 			}
 		}
-		sort.Strings(plugins)
+		sort.Strings(keys)
+		var plugins []PluginUninstall
+		for _, key := range keys {
+			p, err := inspect(key, installPath[key])
+			if err != nil {
+				plugins = append(plugins, PluginUninstall{Key: key, Unknown: true})
+				continue
+			}
+			if p.HasSkills() {
+				plugins = append(plugins, PluginUninstall{Key: key, Extras: p.Extras})
+			}
+		}
 		r.Uninstall[name] = plugins
 	}
 
@@ -158,10 +201,24 @@ func readJSON(path string, v any) error {
 	return nil
 }
 
-// pluginScopes returns the scopes of an installed_plugins entry (an array, or a single object in old files).
-func pluginScopes(raw json.RawMessage) map[string]bool {
+// inspect loads the installed plugin key ("plugin@marketplace") from Claude Code's install folder.
+func inspect(key, dir string) (marketplace.Plugin, error) {
+	if dir == "" {
+		return marketplace.Plugin{}, errors.New("no install folder")
+	}
+	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+		return marketplace.Plugin{}, fmt.Errorf("install folder %s missing", dir)
+	}
+	p, _, err := marketplace.LoadPlugin(marketplace.Entry{Name: key[:strings.LastIndex(key, "@")]}, dir)
+	return p, err
+}
+
+// pluginScopes returns the scopes of an installed_plugins entry (an array, or a single object in
+// old files), each with its install folder.
+func pluginScopes(raw json.RawMessage) map[string]string {
 	type entry struct {
-		Scope string `json:"scope"`
+		Scope       string `json:"scope"`
+		InstallPath string `json:"installPath"`
 	}
 	var list []entry
 	if json.Unmarshal(raw, &list) != nil {
@@ -171,9 +228,9 @@ func pluginScopes(raw json.RawMessage) map[string]bool {
 		}
 		list = []entry{one}
 	}
-	scopes := map[string]bool{}
+	scopes := map[string]string{}
 	for _, e := range list {
-		scopes[e.Scope] = true
+		scopes[e.Scope] = e.InstallPath
 	}
 	return scopes
 }
@@ -203,8 +260,8 @@ func ApplyClaude(cfgPath, skillsDir string, r ClaudeResult, force bool, out io.W
 			}
 			c.Sources[n] = r.Sources[n]
 			lines = append(lines, "imported source "+n)
-			for _, key := range r.Uninstall[n] {
-				steps = append(steps, "claude plugin uninstall "+key)
+			for _, p := range r.Uninstall[n] {
+				steps = append(steps, p.Step())
 			}
 		}
 		if len(r.UserSkills) > 0 {

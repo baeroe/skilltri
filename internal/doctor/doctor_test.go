@@ -270,15 +270,24 @@ func TestDuplicatesCheck(t *testing.T) {
 		{ID: "demo", Source: "loc", Skill: skills.Skill{Name: "demo", Dir: "/demo/loc/demo"}},
 		{ID: "quiet", Source: "off", Skill: skills.Skill{Name: "quiet", Dir: "/demo/off/quiet"}},
 		{ID: "tool:helper", Source: "mk", Plugin: "tool", Skill: skills.Skill{Name: "helper", Dir: "/demo/mk/tool/skills/helper"}},
+		{ID: "hooky:h", Source: "mk", Plugin: "hooky", Skill: skills.Skill{Name: "h", Dir: "/demo/mk/hooky/skills/h"}},
+	}, Plugins: []catalog.PluginInfo{
+		{Source: "mk", Plugin: "tool", Name: "tool", Loaded: true},
+		{Source: "mk", Plugin: "hooky", Name: "hooky", Loaded: true, Extras: []string{"agents", "hooks"}},
+		{Source: "mk", Plugin: "lsp", Name: "lsp", Loaded: true, Extras: []string{"LSP servers"}},
 	}})
 	for _, n := range []string{"demo", "quiet", "synced", "helper"} {
 		mkdir(t, filepath.Join(e.Home, ".claude", "skills", n))
 	}
 	write(t, filepath.Join(e.Home, ".claude", "settings.json"),
-		`{"enabledPlugins":{"tool@mk":true,"dis@mk":true,"gone@mk":false,"other@elsewhere":true}}`)
-	f := expect(t, run(e), "duplicates", [2]string{"warning", "demo"}, [2]string{"warning", "tool@mk"})
-	if !strings.Contains(f[1].Fix, "claude plugin uninstall tool@mk") {
-		t.Errorf("fix = %q", f[1].Fix)
+		`{"enabledPlugins":{"tool@mk":true,"dis@mk":true,"gone@mk":false,"other@elsewhere":true,"lsp@mk":true,"hooky@mk":true}}`)
+	// lsp@mk has no skills: uninstalling it would only lose its LSP servers, so no advice
+	f := expect(t, run(e), "duplicates", [2]string{"warning", "demo"}, [2]string{"warning", "hooky@mk"}, [2]string{"warning", "tool@mk"})
+	if f[2].Fix != "claude plugin uninstall tool@mk" {
+		t.Errorf("fix = %q", f[2].Fix)
+	}
+	if !strings.Contains(f[1].Message, "agents and hooks") || !strings.Contains(f[1].Fix, "only if you do not need its agents and hooks") {
+		t.Errorf("finding = %+v", f[1])
 	}
 }
 
