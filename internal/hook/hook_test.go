@@ -334,6 +334,19 @@ func TestComputeProjectDirOptIn(t *testing.T) {
 	}
 
 	f.writeConfig(t, []string{"claude-code", "codex", "gemini-cli", "nope"})
+	// outside a git work tree nothing is linked
+	e = Compute(f.p, nil)
+	if _, err := os.Lstat(filepath.Join(f.p, ".agents")); !os.IsNotExist(err) || e.Set[NativeVar] != "claude-code" {
+		t.Fatalf("linked outside a work tree: %v %+v", err, e)
+	}
+	// never in HOME, even when HOME is a (dotfiles) work tree
+	for _, d := range []string{f.p, f.q, f.home} {
+		mkdir(t, d, ".git")
+	}
+	e = Compute(f.home, nil)
+	if _, err := os.Lstat(filepath.Join(f.home, ".agents")); !os.IsNotExist(err) || e.Set[NativeVar] != "claude-code" {
+		t.Fatalf("linked into HOME: %v %+v", err, e)
+	}
 	e = Compute(f.p, nil)
 	for _, name := range []string{"alpha", "beta"} {
 		target, err := os.Readlink(filepath.Join(f.p, ".agents/skills", name))
@@ -360,6 +373,7 @@ func TestComputeProjectDirOptIn(t *testing.T) {
 		t.Skip("root ignores folder permissions")
 	}
 	ro := mkdir(t, f.home, "ro")
+	mkdir(t, ro, ".git")
 	if err := os.Chmod(ro, 0o555); err != nil {
 		t.Fatal(err)
 	}

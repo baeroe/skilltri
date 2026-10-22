@@ -42,7 +42,8 @@ type Env struct {
 // first in PluginDirsVar and is restored when dir has no skills. Compute never fails: a config load
 // error, a catalog that cannot be built or a missing folder yield only the marker variables (BaseVar
 // and the restored base) plus a note. Without a cached catalog it builds one from the existing
-// checkouts and saves it. For enabled project-dir adapters it syncs each distinct ProjectDir once.
+// checkouts and saves it. For enabled project-dir adapters it syncs each distinct ProjectDir once,
+// linking skills only where adapters.ProjectDirAllowed (HOME from the environment).
 func Compute(dir string, environ []string) Env {
 	vars := parse(environ)
 	base, seen := vars[BaseVar]
@@ -96,6 +97,12 @@ func compute(dir string) (dirs, native, notes []string) {
 
 	delivered := map[string]bool{} // ProjectDir → its one sync linked skills without error
 	seen := map[string]bool{}
+	// project-dir links only inside git work trees and never in HOME or above; elsewhere the sync
+	// only removes links skilltri made earlier
+	linkable := active
+	if home, _ := os.UserHomeDir(); !adapters.ProjectDirAllowed(dir, home) {
+		linkable = nil
+	}
 	for _, id := range cfg.EnabledAdapters() {
 		if seen[id] {
 			continue
@@ -120,7 +127,7 @@ func compute(dir string) (dirs, native, notes []string) {
 		case adapters.MethodProjectDir:
 			ok, done := delivered[a.ProjectDir]
 			if !done {
-				res, err := adapters.SyncProjectDir(dir, a.ProjectDir, active)
+				res, err := adapters.SyncProjectDir(dir, a.ProjectDir, linkable)
 				if err != nil {
 					notes = append(notes, fmt.Sprintf("%s: %v", a.ProjectDir, err))
 				}

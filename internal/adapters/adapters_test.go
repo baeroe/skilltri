@@ -461,3 +461,41 @@ func TestSyncExcludeLongLine(t *testing.T) {
 		t.Fatalf("exclude lost content: got %d bytes, want %d", len(got), len(want))
 	}
 }
+
+func TestProjectDirAllowed(t *testing.T) {
+	root := t.TempDir()
+	mk := func(base, rel string, git bool) string {
+		t.Helper()
+		d := filepath.Join(base, rel)
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if git {
+			if err := os.MkdirAll(filepath.Join(d, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return d
+	}
+	mk(root, "", true)             // an ancestor of home that is a work tree
+	home := mk(root, "home", true) // a dotfiles repo in home
+	link := filepath.Join(root, "link-to-home")
+	if err := os.Symlink(home, link); err != nil {
+		t.Fatal(err)
+	}
+	outside := mk(t.TempDir(), "plain", false)
+	for dir, want := range map[string]bool{
+		home:                                 false,
+		root:                                 false,
+		link:                                 false,
+		mk(home, "dev/p", true):              true,
+		mk(home, "plain", false):             true, // inside the dotfiles work tree
+		mk(root, "other", false):             true, // inside root's work tree, not an ancestor of home
+		outside:                              false,
+		filepath.Join(home, "dev/p/missing"): false,
+	} {
+		if got := ProjectDirAllowed(dir, home); got != want {
+			t.Errorf("ProjectDirAllowed(%s) = %v, want %v", dir, got, want)
+		}
+	}
+}

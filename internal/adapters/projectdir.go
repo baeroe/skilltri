@@ -27,6 +27,28 @@ type manifest struct {
 	Links map[string]string `json:"links"`
 }
 
+// ProjectDirAllowed reports whether skilltri may link skills into a project folder of sessionDir:
+// only inside a git work tree (where info/exclude keeps the links out of commits), and never in
+// home or any of its ancestors (a dotfiles repo makes home a work tree too). Paths are compared
+// after resolving symlinks; a folder that cannot be resolved is not allowed.
+func ProjectDirAllowed(sessionDir, home string) bool {
+	dir, err := filepath.EvalSymlinks(sessionDir)
+	if err != nil {
+		return false
+	}
+	if home != "" {
+		h, err := filepath.EvalSymlinks(home)
+		if err != nil {
+			h = filepath.Clean(home)
+		}
+		if h == dir || strings.HasPrefix(h, strings.TrimSuffix(dir, string(filepath.Separator))+string(filepath.Separator)) {
+			return false
+		}
+	}
+	root, _, err := findGit(dir)
+	return err == nil && root != ""
+}
+
 // SyncResult reports a SyncProjectDir run: Linked are the owned links in place afterwards, Removed
 // the owned links removed by this run, Skipped the names left alone because a user entry of that
 // name exists (including a manifest-listed link that no longer points where skilltri pointed it).
