@@ -2,14 +2,21 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"golang.org/x/term"
 
+	"github.com/baeroe/skilltri/internal/daemon"
+	"github.com/baeroe/skilltri/internal/gateway"
 	"github.com/baeroe/skilltri/internal/importer"
 	"github.com/baeroe/skilltri/internal/paths"
 	"github.com/baeroe/skilltri/internal/secrets"
@@ -54,7 +61,9 @@ func run(args []string) int {
 	case "version", "-v", "--version":
 		fmt.Println(version)
 		return 0
-	case "mcp", "daemon", "status", "which":
+	case "daemon":
+		return runDaemon(args[1:])
+	case "mcp", "status", "which":
 		fmt.Fprintf(os.Stderr, "skilltri %s: not implemented yet\n", cmd)
 		return 1
 	case "import":
@@ -65,6 +74,39 @@ func run(args []string) int {
 		fmt.Fprintf(os.Stderr, "skilltri: unknown command %q\n\n%s", cmd, usage)
 		return 2
 	}
+}
+
+// runDaemon runs the gateway daemon in the foreground until SIGINT or SIGTERM, logging to stderr.
+func runDaemon(args []string) int {
+	if len(args) > 0 {
+		switch args[0] {
+		case "install", "uninstall":
+			fmt.Fprintf(os.Stderr, "skilltri daemon %s: not implemented yet\n", args[0])
+			return 1
+		default:
+			fmt.Fprint(os.Stderr, "usage: skilltri daemon [install | uninstall]\n")
+			return 2
+		}
+	}
+	gateway.Version = version
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	d := daemon.New(daemon.Options{
+		ConfigPath: paths.ConfigFile(),
+		SocketPath: paths.SocketPath(),
+		LockPath:   paths.DaemonLock(),
+		Version:    version,
+		Logger:     log.New(os.Stderr, "skilltri daemon: ", log.LstdFlags),
+	})
+	if err := d.Run(ctx); err != nil {
+		if errors.Is(err, daemon.ErrAlreadyRunning) {
+			fmt.Fprintln(os.Stderr, "skilltri: daemon already running")
+		} else {
+			fmt.Fprintf(os.Stderr, "skilltri: %v\n", err)
+		}
+		return 1
+	}
+	return 0
 }
 
 func runSecret(args []string) int {

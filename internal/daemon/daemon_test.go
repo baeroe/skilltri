@@ -1,0 +1,434 @@
+package daemon
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/baeroe/skilltri/internal/config"
+	"github.com/baeroe/skilltri/internal/rules"
+	"github.com/baeroe/skilltri/internal/testutil/fakemcp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+var fakeBin string
+
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "fakemcp")
+	if err != nil {
+		panic(err)
+	}
+	fakeBin = filepath.Join(dir, "fakemcp")
+	out, err := exec.Command("go", "build", "-o", fakeBin, "github.com/baeroe/skilltri/internal/testutil/fakemcp/cmd/fakemcp").CombinedOutput()
+	if err != nil {
+		panic(fmt.Sprintf("build fakemcp: %v\n%s", err, out))
+	}
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
+
+const poll = 50 * time.Millisecond
+
+// env is a daemon's files in a short /tmp dir (macOS limits socket paths to 104 bytes).
+type env struct {
+	dir, cfg, sock, lock string
+}
+
+func newEnv(t *testing.T) env {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "st")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return env{dir: dir, cfg: filepath.Join(dir, "config.json"), sock: filepath.Join(dir, "d.sock"), lock: filepath.Join(dir, "d.lock")}
+}
+
+func (e env) options() Options {
+	return Options{ConfigPath: e.cfg, SocketPath: e.sock, LockPath: e.lock, Version: "test", PollInterval: poll}
+}
+
+// writeConfig writes c as the config file and makes sure its mtime moves forward.
+func (e env) writeConfig(t *testing.T, c *config.Config) {
+	t.Helper()
+	b, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.writeRaw(t, string(b))
+}
+
+func (e env) writeRaw(t *testing.T, s string) {
+	t.Helper()
+	var old time.Time
+	if fi, err := os.Stat(e.cfg); err == nil {
+		old = fi.ModTime()
+	}
+	if err := os.WriteFile(e.cfg, []byte(s), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(e.cfg); err == nil && !fi.ModTime().After(old) {
+		later := old.Add(time.Second)
+		_ = os.Chtimes(e.cfg, later, later)
+	}
+}
+
+// start runs a daemon until the test ends and waits until it answers on the socket.
+func (e env) start(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- New(e.options()).Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("Run: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Error("Run did not return after cancel")
+		}
+		if _, err := os.Stat(e.sock); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("socket left behind: %v", err)
+		}
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var st StatusReply
+		err := Control(e.sock, Hello{Kind: "control", Cmd: "status"}, &st)
+		if err == nil {
+			return
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("Run returned early: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("daemon not reachable: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func (e env) status(t *testing.T) StatusReply {
+	t.Helper()
+	var st StatusReply
+	if err := Control(e.sock, Hello{V: 1, Kind: "control", Cmd: "status"}, &st); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	return st
+}
+
+func fake(name, tools string) *config.Server {
+	return &config.Server{Type: "stdio", Command: fakeBin, Env: map[string]string{"FAKEMCP_NAME": name, "FAKEMCP_TOOLS": tools}}
+}
+
+func cfgOf(servers map[string]*config.Server) *config.Config {
+	return &config.Config{Version: 1, Servers: servers}
+}
+
+// client is a harness session over the daemon socket.
+type client struct {
+	cs      *mcp.ClientSession
+	changed chan struct{}
+}
+
+func (e env) connect(t *testing.T, h Hello, roots ...string) *client {
+	t.Helper()
+	conn, err := net.Dial("unix", e.sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.V, h.Kind = 1, "session"
+	b, _ := json.Marshal(h)
+	if _, err := conn.Write(append(b, '\n')); err != nil {
+		t.Fatal(err)
+	}
+	c := &client{changed: make(chan struct{}, 16)}
+	opts := &mcp.ClientOptions{ToolListChangedHandler: func(context.Context, *mcp.ToolListChangedRequest) { c.changed <- struct{}{} }}
+	if len(roots) == 0 {
+		opts.Capabilities = &mcp.ClientCapabilities{}
+	}
+	mc := mcp.NewClient(&mcp.Implementation{Name: "test-harness", Version: "0"}, opts)
+	for _, r := range roots {
+		mc.AddRoots(&mcp.Root{URI: "file://" + r})
+	}
+	var so *mcp.ClientSessionOptions
+	if len(roots) > 0 { // roots/list needs the initialize protocol; 2026-07-28 forbids it
+		so = &mcp.ClientSessionOptions{ProtocolVersion: "2025-11-25"}
+	}
+	c.cs, err = mc.Connect(context.Background(), &mcp.IOTransport{Reader: conn, Writer: conn}, so)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { c.cs.Close() })
+	return c
+}
+
+func (c *client) tools(t *testing.T) []string {
+	t.Helper()
+	res, err := c.cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	var names []string
+	for _, tl := range res.Tools {
+		names = append(names, tl.Name)
+	}
+	slices.Sort(names)
+	return names
+}
+
+func (c *client) pid(t *testing.T, tool string) int {
+	t.Helper()
+	res, err := c.cs.CallTool(context.Background(), &mcp.CallToolParams{Name: tool, Arguments: map[string]any{}})
+	if err != nil {
+		t.Fatalf("CallTool %s: %v", tool, err)
+	}
+	if res.IsError || len(res.Content) == 0 {
+		t.Fatalf("CallTool %s: error result %+v", tool, res.Content)
+	}
+	var echo fakemcp.Echo
+	if err := json.Unmarshal([]byte(res.Content[0].(*mcp.TextContent).Text), &echo); err != nil {
+		t.Fatal(err)
+	}
+	return echo.PID
+}
+
+// eventually polls cond until it holds or the timeout passes.
+func eventually(t *testing.T, timeout time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func projectDirs(t *testing.T) (p, sub string) {
+	t.Helper()
+	p = rules.Normalize(t.TempDir())
+	sub = filepath.Join(p, "sub")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return p, sub
+}
+
+func TestSingleInstance(t *testing.T) {
+	e := newEnv(t)
+	e.start(t)
+	o := e.options()
+	o.SocketPath = filepath.Join(e.dir, "other.sock")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := New(o).Run(ctx); !errors.Is(err, ErrAlreadyRunning) {
+		t.Fatalf("second Run = %v, want ErrAlreadyRunning", err)
+	}
+	e.status(t) // the first daemon is unaffected
+}
+
+func TestStaleSocket(t *testing.T) {
+	e := newEnv(t)
+	if err := os.WriteFile(e.sock, []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e.start(t)
+	fi, err := os.Stat(e.sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode()&os.ModeSocket == 0 || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("socket mode = %v, want socket 0600", fi.Mode())
+	}
+}
+
+func TestSessionOverSocket(t *testing.T) {
+	e := newEnv(t)
+	p, sub := projectDirs(t)
+	b := fake("b", "z")
+	b.Rules = []rules.Rule{{Path: p, Mode: rules.Only}}
+	e.writeConfig(t, cfgOf(map[string]*config.Server{"a": fake("a", "x,y"), "b": b}))
+	e.start(t)
+
+	if got := e.connect(t, Hello{Dir: p}).tools(t); !slices.Equal(got, []string{"a_x", "a_y", "b_z"}) {
+		t.Fatalf("tools in p = %v", got)
+	}
+	if got := e.connect(t, Hello{Dir: sub}).tools(t); !slices.Equal(got, []string{"a_x", "a_y"}) {
+		t.Fatalf("tools in sub = %v", got)
+	}
+}
+
+func TestRootsOverrideDir(t *testing.T) {
+	e := newEnv(t)
+	p, sub := projectDirs(t)
+	b := fake("b", "z")
+	b.Rules = []rules.Rule{{Path: p, Mode: rules.Only}}
+	e.writeConfig(t, cfgOf(map[string]*config.Server{"b": b}))
+	e.start(t)
+
+	sessionDir := func(client string) func() string {
+		return func() string {
+			for _, s := range e.status(t).Sessions {
+				if s.ClientName == client {
+					return s.Dir
+				}
+			}
+			return ""
+		}
+	}
+
+	c := e.connect(t, Hello{Dir: sub}, p)
+	select {
+	case <-c.changed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no tools list_changed after the roots answer")
+	}
+	if got := sessionDir("test-harness")(); got != p {
+		t.Fatalf("session dir = %q, want root %q", got, p)
+	}
+	if got := c.tools(t); !slices.Equal(got, []string{"b_z"}) {
+		t.Fatalf("tools after roots = %v", got)
+	}
+	c.cs.Close()
+	eventually(t, 5*time.Second, "closed session to leave status", func() bool { return len(e.status(t).Sessions) == 0 })
+
+	c = e.connect(t, Hello{Dir: sub, DirExplicit: true}, p)
+	time.Sleep(300 * time.Millisecond)
+	if got := sessionDir("test-harness")(); got != sub {
+		t.Fatalf("explicit session dir = %q, want %q", got, sub)
+	}
+	if got := c.tools(t); len(got) != 0 {
+		t.Fatalf("explicit tools = %v", got)
+	}
+}
+
+func TestConfigReload(t *testing.T) {
+	e := newEnv(t)
+	p, _ := projectDirs(t)
+	a := fake("a", "x")
+	e.writeConfig(t, cfgOf(map[string]*config.Server{"a": a}))
+	e.start(t)
+	c := e.connect(t, Hello{Dir: p})
+	if got := c.tools(t); !slices.Equal(got, []string{"a_x"}) {
+		t.Fatalf("tools = %v", got)
+	}
+	pid := c.pid(t, "a_x")
+
+	e.writeConfig(t, cfgOf(map[string]*config.Server{"a": a, "b": fake("b", "z")}))
+	eventually(t, 3*poll+2*time.Second, "b_z after adding b", func() bool { return slices.Contains(c.tools(t), "b_z") })
+
+	a.Rules = []rules.Rule{{Path: p, Mode: rules.Tree}}
+	e.writeConfig(t, cfgOf(map[string]*config.Server{"a": a, "b": fake("b", "z")}))
+	time.Sleep(5 * poll)
+	if got := c.pid(t, "a_x"); got != pid {
+		t.Fatalf("rules change restarted a: pid %d → %d", pid, got)
+	}
+
+	a.Args = []string{"--changed"}
+	e.writeConfig(t, cfgOf(map[string]*config.Server{"a": a, "b": fake("b", "z")}))
+	eventually(t, 5*time.Second, "a restarted after args change", func() bool {
+		res, err := c.cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "a_x", Arguments: map[string]any{}})
+		if err != nil || res.IsError {
+			return false
+		}
+		var echo fakemcp.Echo
+		_ = json.Unmarshal([]byte(res.Content[0].(*mcp.TextContent).Text), &echo)
+		return echo.PID != 0 && echo.PID != pid
+	})
+}
+
+func TestBrokenConfig(t *testing.T) {
+	t.Run("after start", func(t *testing.T) {
+		e := newEnv(t)
+		p, _ := projectDirs(t)
+		e.writeConfig(t, cfgOf(map[string]*config.Server{"a": fake("a", "x")}))
+		e.start(t)
+		c := e.connect(t, Hello{Dir: p})
+		e.writeRaw(t, "{")
+		eventually(t, 3*poll+2*time.Second, "ConfigError", func() bool { return e.status(t).ConfigError != "" })
+		if got := c.tools(t); !slices.Equal(got, []string{"a_x"}) {
+			t.Fatalf("tools after broken config = %v", got)
+		}
+		if got := c.pid(t, "a_x"); got == 0 {
+			t.Fatal("no pid")
+		}
+		e.writeConfig(t, cfgOf(map[string]*config.Server{"a": fake("a", "x")}))
+		eventually(t, 3*poll+2*time.Second, "ConfigError cleared", func() bool { return e.status(t).ConfigError == "" })
+	})
+	t.Run("at start", func(t *testing.T) {
+		e := newEnv(t)
+		e.writeRaw(t, "{")
+		e.start(t)
+		st := e.status(t)
+		if st.ConfigError == "" || len(st.Servers) != 0 {
+			t.Fatalf("status = %+v, want ConfigError and no servers", st)
+		}
+		p, _ := projectDirs(t)
+		if got := e.connect(t, Hello{Dir: p}).tools(t); len(got) != 0 {
+			t.Fatalf("tools = %v", got)
+		}
+	})
+}
+
+func TestControlStatusWhich(t *testing.T) {
+	e := newEnv(t)
+	p, sub := projectDirs(t)
+	b := fake("b", "z")
+	b.Rules = []rules.Rule{{Path: sub, Mode: rules.Only}}
+	e.writeConfig(t, cfgOf(map[string]*config.Server{"a": fake("a", "x,y"), "b": b}))
+	e.start(t)
+	c := e.connect(t, Hello{Dir: p})
+	c.tools(t)
+
+	st := e.status(t)
+	if st.PID != os.Getpid() || st.Version != "test" || st.ConfigError != "" {
+		t.Fatalf("status = %+v", st)
+	}
+	if len(st.Sessions) != 1 || st.Sessions[0].Dir != p || st.Sessions[0].ID == "" || st.Sessions[0].ClientName != "test-harness" {
+		t.Fatalf("sessions = %+v", st.Sessions)
+	}
+	states := map[string]string{}
+	for _, s := range st.Servers {
+		states[s.Name] = s.State
+	}
+	if states["a"] != "ready" || states["b"] != "stopped" {
+		t.Fatalf("server states = %v", states)
+	}
+
+	var w WhichReply
+	if err := Control(e.sock, Hello{Kind: "control", Cmd: "which", Args: []string{p}}, &w); err != nil {
+		t.Fatal(err)
+	}
+	if w.Dir != p || len(w.Servers) != 2 {
+		t.Fatalf("which = %+v", w)
+	}
+	wa, wb := w.Servers[0], w.Servers[1]
+	if wa.Name != "a" || !wa.Decision.Active || wa.Decision.Reason == "" || wa.State != "ready" {
+		t.Fatalf("which a = %+v", wa)
+	}
+	if len(wa.Tools) != 2 || wa.Tools[0].Name != "x" || wa.Tools[0].Exposed != "a_x" || !wa.Tools[0].Decision.Active {
+		t.Fatalf("which a tools = %+v", wa.Tools)
+	}
+	if wb.Name != "b" || wb.Decision.Active || !strings.Contains(wb.Decision.Reason, "no include matches") || wb.Tools != nil {
+		t.Fatalf("which b = %+v", wb)
+	}
+
+	if err := Control(e.sock, Hello{Kind: "control", Cmd: "nope"}, &w); err == nil {
+		t.Fatal("unknown control command succeeded")
+	}
+}
