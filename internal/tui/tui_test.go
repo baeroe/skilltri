@@ -429,9 +429,17 @@ func TestLayoutHelpers(t *testing.T) {
 	if got := ellipsizeMiddle("/very/long/path/to/file", 10); width(got) != 10 || !strings.Contains(got, "…") || !strings.HasSuffix(got, "file") {
 		t.Errorf("ellipsizeMiddle: %q", got)
 	}
-	home, _ := os.UserHomeDir()
-	if got := tildify(filepath.Join(home, "x")); got != "~/x" {
+	if got := ellipsizeMiddle(strings.Repeat("日本語", 10), 11); width(got) > 11 || !strings.Contains(got, "…") || width(got) < 10 {
+		t.Errorf("ellipsizeMiddle CJK: %q (%d cells)", got, width(got))
+	}
+	if got := tildify("/demo/home/x", "/demo/home"); got != "~/x" {
 		t.Errorf("tildify: %q", got)
+	}
+	if got := tildify("/demo/home", "/demo/home"); got != "~" {
+		t.Errorf("tildify home: %q", got)
+	}
+	if got := tildify("/demo/homes/x", "/demo/home"); got != "/demo/homes/x" {
+		t.Errorf("tildify prefix: %q", got)
 	}
 	if got := san("a\x1b[31mb\tc\x07"); got != "ab    c?" {
 		t.Errorf("san: %q", got)
@@ -470,5 +478,49 @@ func TestLayoutHelpers(t *testing.T) {
 	}
 	if ago(time.Time{}, now) != "never" {
 		t.Error("ago zero")
+	}
+}
+
+// TestReloadAfterInterleavedStatus: a status refresh issued while a load runs must not leave the
+// model thinking the load is still running (which would disable file-change reloads).
+func TestReloadAfterInterleavedStatus(t *testing.T) {
+	h := newHarness(t, TabServers)
+	h.writeConfig(demoConfig(2))
+	load := h.m.Init()
+	h.now = h.now.Add(2 * time.Second)
+	_, status := h.m.Update(tickMsg(h.now))
+	h.m.Update(status())
+	h.m.Update(load())
+	if !strings.Contains(header(h), "servers 2") {
+		t.Fatalf("snapshot not applied: %q", header(h))
+	}
+	h.writeConfig(demoConfig(5))
+	future := h.now.Add(time.Minute)
+	os.Chtimes(h.m.opts.Env.ConfigPath, future, future)
+	h.tick(2 * time.Second)
+	if !strings.Contains(header(h), "servers 5") {
+		t.Fatalf("file change after an interleaved status not reloaded: %q", header(h))
+	}
+}
+
+type fakeModal struct{ closedN int }
+
+func (f *fakeModal) update(*Model, tea.Msg) (tea.Cmd, bool) { return nil, false }
+func (f *fakeModal) view(*Model, int, int) string           { return "fake" }
+func (f *fakeModal) closed(*Model)                          { f.closedN++ }
+
+func TestModalClosedHook(t *testing.T) {
+	h := newHarness(t, TabServers)
+	h.load()
+	a, b := &fakeModal{}, &fakeModal{}
+	h.m.openModal(a)
+	h.m.openModal(b)
+	h.key("esc")
+	if b.closedN != 1 || a.closedN != 0 || len(h.m.modals) != 1 {
+		t.Fatalf("esc: a=%d b=%d open=%d", a.closedN, b.closedN, len(h.m.modals))
+	}
+	h.key("ctrl+c")
+	if a.closedN != 1 || b.closedN != 1 {
+		t.Fatalf("quit: a=%d b=%d", a.closedN, b.closedN)
 	}
 }

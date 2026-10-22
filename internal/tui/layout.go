@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -44,28 +43,33 @@ func padLeft(s string, w int) string {
 	return strings.Repeat(" ", w-width(s)) + s
 }
 
-// ellipsizeMiddle shortens plain text to w cells by cutting out the middle (good for paths).
+// ellipsizeMiddle shortens plain text to at most w cells by cutting out the middle (good for
+// paths). It counts display cells, so wide characters never push it past w.
 func ellipsizeMiddle(s string, w int) string {
-	if width(s) <= w || w < 5 {
+	sw := width(s)
+	if sw <= w || w < 5 {
 		return ansi.Truncate(s, w, "…")
 	}
-	r := []rune(s)
 	keepR := (w - 1) * 2 / 3
 	keepL := w - 1 - keepR
-	return string(r[:keepL]) + "…" + string(r[len(r)-keepR:])
+	right := []rune(ansi.TruncateLeft(s, sw-keepR, ""))
+	for len(right) > 0 && width(string(right)) > keepR {
+		right = right[1:] // a wide character straddled the cut
+	}
+	return ansi.Truncate(s, keepL, "") + "…" + string(right)
 }
 
-// tildify shows paths under $HOME with ~.
-func tildify(p string) string {
-	h, err := os.UserHomeDir()
-	if err != nil || h == "" || h == "/" {
+// tildify shows paths under home (Options.Home) with ~.
+func tildify(p, home string) string {
+	home = strings.TrimSuffix(home, string(filepath.Separator))
+	if home == "" {
 		return p
 	}
-	if p == h {
+	if p == home {
 		return "~"
 	}
-	if strings.HasPrefix(p, h+string(filepath.Separator)) {
-		return "~" + p[len(h):]
+	if strings.HasPrefix(p, home+string(filepath.Separator)) {
+		return "~" + p[len(home):]
 	}
 	return p
 }

@@ -4,13 +4,19 @@
 // Structure (later tabs and dialogs plug into it):
 //
 //   - Each tab is a tabModel (see below) with its own state, keys, view and hints. The Model routes
-//     every key the global handler does not take to the active tab, and every other message
-//     (snapshotMsg, statusMsg, results of the tab's own commands, …) to all tabs, after the Model
-//     applied it. A tab keeps its selection by key (e.g. the selected server name), not by index,
-//     and re-resolves it when it sees a snapshotMsg: reloads never reset it.
+//     every key the global handler does not take to the active tab, and every other message except
+//     tickMsg and tea.WindowSizeMsg (snapshotMsg, statusMsg, results of commands, …) to all tabs,
+//     after the Model applied it. Every tab therefore sees every result: a tab returns results of
+//     its own work as its own message types and ignores types it does not know. A tab keeps its
+//     selection by key (e.g. the selected server name), not by index, and re-resolves it when it
+//     sees a snapshotMsg: reloads never reset it. The terminal size is m.width/m.height (view also
+//     gets the body size).
 //   - Dialogs are modals on a stack (Model.openModal); only the top one gets keys. esc closes the top
 //     modal (unless it implements escOwner), q quits only when no modal is open, ctrl+c always quits.
 //     Non-key messages go to every open modal, so a form under a confirmation still gets its results.
+//     A modal that owns background work implements closer: closed is called whenever it leaves the
+//     stack (esc, closed=true, quit) so it can cancel that work. Tabs may implement closer too; it
+//     is called on quit.
 //   - Nothing in Update blocks: loading, daemon calls and other work run in tea.Cmds; results come
 //     back as messages. Action results are reported with Model.flash in the footer's status line.
 package tui
@@ -69,7 +75,8 @@ type Options struct {
 }
 
 // tabModel is one tab. update gets the keys the Model does not handle globally and every non-key
-// message; it returns follow-up work as a command. view renders the body in exactly w x h cells
+// message except tickMsg and tea.WindowSizeMsg (results of other tabs included: use own message
+// types and ignore the others); it returns follow-up work as a command. view renders the body in exactly w x h cells
 // (lines are clamped, but a tab must not rely on that for its layout). hints are key/description
 // pairs for the footer ("a", "add", "d", "delete"); the global ones are appended by the Model.
 type tabModel interface {
@@ -95,6 +102,10 @@ type modal interface {
 // modalHinter is implemented by modals that show their own footer hints (pairs as in tabModel).
 type modalHinter interface{ hints() []string }
 
+// closer is implemented by modals (and tabs) that own background work: closed is called when the
+// modal leaves the stack for any reason, and for every open modal and every tab on quit.
+type closer interface{ closed(m *Model) }
+
 // escOwner is implemented by modals that handle esc themselves (e.g. to leave a sub-mode first);
 // the others are closed by esc without seeing it.
 type escOwner interface{ ownsEsc() bool }
@@ -110,7 +121,8 @@ type Model struct {
 
 	snap       Snapshot
 	stamps     fileStamps
-	seq        int  // last issued load/status sequence number
+	issued     int  // last issued load/status sequence number (orders snapshot and status results)
+	loadSeq    int  // seq of the last issued snapshot load
 	snapSeq    int  // seq of the applied snapshot
 	statusSeq  int  // seq of the applied daemon status (from a snapshot or a status refresh)
 	loading    bool // a full snapshot load is in flight
@@ -179,8 +191,9 @@ func (m *Model) Init() tea.Cmd {
 
 // reload starts a full snapshot load.
 func (m *Model) reload() tea.Cmd {
-	m.seq++
-	seq, load := m.seq, loadSnapshot(m.opts)
+	m.issued++
+	m.loadSeq = m.issued
+	seq, load := m.issued, loadSnapshot(m.opts)
 	m.loading = true
 	return func() tea.Msg {
 		msg := load().(snapshotMsg)
@@ -194,9 +207,9 @@ func (m *Model) refreshStatus() tea.Cmd {
 	if m.statusBusy {
 		return nil
 	}
-	m.seq++
+	m.issued++
 	m.statusBusy = true
-	seq, load := m.seq, loadStatus(m.opts)
+	seq, load := m.issued, loadStatus(m.opts)
 	return func() tea.Msg {
 		msg := load().(statusMsg)
 		msg.seq = seq
@@ -223,6 +236,9 @@ func (m *Model) removeModal(md modal) {
 	for i := len(m.modals) - 1; i >= 0; i-- {
 		if m.modals[i] == md {
 			m.modals = append(m.modals[:i], m.modals[i+1:]...)
+			if c, ok := md.(closer); ok {
+				c.closed(m)
+			}
 			return
 		}
 	}
@@ -230,7 +246,16 @@ func (m *Model) removeModal(md modal) {
 
 func (m *Model) switchTab(t Tab) { m.tab = (t + numTabs) % numTabs }
 
+// quit closes every modal (top first) and tells the tabs, so background work is cancelled.
 func (m *Model) quit() tea.Cmd {
+	for len(m.modals) > 0 {
+		m.removeModal(m.modals[len(m.modals)-1])
+	}
+	for _, t := range m.tabs {
+		if c, ok := t.(closer); ok {
+			c.closed(m)
+		}
+	}
 	m.quitting = true
 	return tea.Quit
 }
@@ -256,7 +281,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.seq < m.snapSeq {
 			return m, nil // an older load finished after a newer one
 		}
-		if msg.seq == m.seq {
+		if msg.seq == m.loadSeq {
 			m.loading = false
 		}
 		st, derr, sseq := m.snap.Status, m.snap.DaemonErr, m.statusSeq
@@ -510,11 +535,11 @@ func (p *placeholderTab) view(m *Model, w, h int) string {
 			}
 		}
 	case TabPreview:
-		lines = append(lines, kv("folder", ellipsizeMiddle(tildify(san(m.opts.Cwd)), max(iw-8, 1)), 8))
+		lines = append(lines, kv("folder", ellipsizeMiddle(tildify(san(m.opts.Cwd), m.opts.Home), max(iw-8, 1)), 8))
 	case TabSetup:
 		lines = append(lines,
-			kv("binary", ellipsizeMiddle(tildify(san(m.opts.Bin)), max(iw-8, 1)), 8),
-			kv("config", ellipsizeMiddle(tildify(m.opts.configPath()), max(iw-8, 1)), 8))
+			kv("binary", ellipsizeMiddle(tildify(san(m.opts.Bin), m.opts.Home), max(iw-8, 1)), 8),
+			kv("config", ellipsizeMiddle(tildify(m.opts.configPath(), m.opts.Home), max(iw-8, 1)), 8))
 	case TabDoctor:
 		for _, wn := range s.warnings() {
 			for _, l := range wrap(wn, max(iw-2, 1)) {
