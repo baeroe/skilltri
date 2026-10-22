@@ -180,11 +180,16 @@ func FromClaude(home string) (ClaudeResult, error) {
 		r.UserSkills = append(r.UserSkills, dir)
 	}
 	if len(r.Sources) > 0 {
-		r.Steps = append(r.Steps, `run "skilltri update" to fetch the imported marketplaces`)
-		r.Steps = append(r.Steps, `plugin MCP servers are not enabled: see "skilltri plugin-server list"`)
+		r.Steps = append(r.Steps, StepUpdate, StepPluginServers)
 	}
 	return r, nil
 }
+
+// The static Claude import steps for the CLI; the TUI shows its own keys for them.
+const (
+	StepUpdate        = `run "skilltri update" to fetch the imported marketplaces`
+	StepPluginServers = `plugin MCP servers are not enabled: see "skilltri plugin-server list"`
+)
 
 // readJSON decodes path into v; a missing file leaves v untouched.
 func readJSON(path string, v any) error {

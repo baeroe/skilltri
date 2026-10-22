@@ -240,13 +240,23 @@ func previewClaudeLines(r importer.ClaudeResult, rep importer.ClaudeReport, skil
 		out = append(out, pvLine{text: "no user skills found", style: dimStyle})
 	}
 	out = append(out, warnLines(rep.Warnings)...)
-	return append(out, stepLines("Next steps after the import (not run by skilltri)", tildeAll(rep.Steps, home))...)
+	return append(out, stepLines("Next steps after the import (not run by skilltri)", tuiStepTexts(rep.Steps, home))...)
 }
 
-func tildeAll(steps []string, home string) []string {
+// tuiSteps are the TUI's words for the importer's CLI steps.
+var tuiSteps = map[string]string{
+	importer.StepUpdate:        "press U on the Skills tab to fetch the imported marketplaces",
+	importer.StepPluginServers: "plugin MCP servers are not enabled: press E on a plugin server in the Skills tab",
+}
+
+// tuiStepTexts shows the home folder as ~ in steps and replaces the importer's CLI steps by tuiSteps.
+func tuiStepTexts(steps []string, home string) []string {
 	homes := homeForms(home) // in a command: normalizing may touch the file system
 	out := make([]string, len(steps))
 	for i, s := range steps {
+		if t, ok := tuiSteps[s]; ok {
+			s = t
+		}
 		out[i] = tildeText(s, homes)
 	}
 	return out
@@ -411,7 +421,7 @@ func (d *importModal) apply(m *Model) tea.Cmd {
 			body = append(body, pvLine{text: "nothing imported", style: dimStyle})
 		}
 		body = append(body, warnLines(rep.Warnings)...)
-		body = append(body, stepLines("Next steps (not run by skilltri)", tildeAll(rep.Steps, home))...)
+		body = append(body, stepLines("Next steps (not run by skilltri)", tuiStepTexts(rep.Steps, home))...)
 		done.steps = len(rep.Steps)
 		done.body = body
 		return done

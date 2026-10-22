@@ -331,10 +331,13 @@ func TestSetupImportClaude(t *testing.T) {
 	h.key("enter")
 	v := screen(h)
 	for _, want := range []string{"Import from Claude Code", "+ alpha: marketplace demo/alpha-plugins", "enabled plugins: lsp-only,",
-		"+ demo-skill", "+ local: local source for the copied skills", "claude plugin uninstall beta-tool@beta.local", "skilltri update"} {
+		"+ demo-skill", "+ local: local source for the copied skills", "claude plugin uninstall beta-tool@beta.local", "U on the Skills tab", "E on a plugin server"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("preview lacks %q:\n%s", want, v)
 		}
+	}
+	if strings.Contains(v, "skilltri update") || strings.Contains(v, "skilltri plugin-server list") {
+		t.Errorf("preview shows CLI next steps:\n%s", v)
 	}
 	h.key("esc")
 	if len(h.m.modals) != 0 || len(h.config().Sources) != 0 {
@@ -349,7 +352,7 @@ func TestSetupImportClaude(t *testing.T) {
 		t.Errorf("skill not copied: %v", err)
 	}
 	v = screen(h)
-	for _, want := range []string{"Imported from Claude Code", "copied skill demo-skill", "Next steps", "remove ~/.claude/skills/demo-skill"} {
+	for _, want := range []string{"Imported from Claude Code", "copied skill demo-skill", "Next steps", "remove ~/.claude/skills/demo-skill", "U on the Skills tab"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("result lacks %q:\n%s", want, v)
 		}
