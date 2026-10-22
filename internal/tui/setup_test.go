@@ -157,12 +157,12 @@ func TestSetupCopy(t *testing.T) {
 	}
 	h.selectSetup(func(r suRow) bool { return r.kind == suShell && r.shell == "fish" })
 	h.key("c")
-	if clip != "skilltri shell-init fish | source" {
+	if clip != "/opt/demo/bin/skilltri shell-init fish | source" { // not on PATH: the absolute binary
 		t.Errorf("fish clip = %q", clip)
 	}
 	h.selectSetup(rowKind(suShell))
 	h.key("c")
-	if clip != `eval "$(skilltri shell-init zsh)"` {
+	if clip != `eval "$(/opt/demo/bin/skilltri shell-init zsh)"` {
 		t.Errorf("zsh clip = %q", clip)
 	}
 	h.m.opts.Clipboard = func(string) error { return errors.New("no clipboard tool") }
@@ -433,5 +433,90 @@ func TestSetupOverflow(t *testing.T) {
 			}
 		}
 		h.key("esc")
+	}
+}
+
+// While one import is applied (its dialog closed), the other cannot start: no stuck spinner.
+func TestSetupImportOneAtATime(t *testing.T) {
+	keyring.MockInit()
+	h := newHarness(t, TabSetup)
+	h.writeHome(".config/1mcp/mcp.json", `{"mcpServers": {"demo": {"command": "demo-mcp"}}}`)
+	h.copyFixture("../importer/testdata/claude-home", "")
+	h.load()
+	h.selectSetup(func(r suRow) bool { return r.kind == suImport && r.imp == importOneMCP })
+	h.key("enter")
+	_, apply := h.m.Update(keyMsg("y"))
+	h.key("esc", "j") // close the dialog, select the Claude import
+	_, read := h.m.Update(keyMsg("enter"))
+	// the footer shows the running import's spinner over the flash
+	if read != nil || h.m.busy(importWork(importClaude)) || h.m.status != "another import is running" || !strings.Contains(screen(h), "importing from 1MCP") {
+		t.Fatalf("second import started:\n%s", screen(h))
+	}
+	h.run(apply)
+	if h.m.busy(importWork(importOneMCP)) || h.m.busy(importWork(importClaude)) || len(h.m.busyKeys) != 0 {
+		t.Fatalf("busy keys left: %v", h.m.busyKeys)
+	}
+	h.key("enter")
+	if len(h.m.modals) != 1 || !strings.Contains(screen(h), "Import from Claude Code") {
+		t.Fatalf("Claude import after the first finished:\n%s", screen(h))
+	}
+}
+
+// esc, then enter again: the first (cancelled) read's late preview is dropped; the second owns the
+// spinner until its own preview arrives.
+func TestSetupImportStaleRead(t *testing.T) {
+	h := newHarness(t, TabSetup)
+	h.writeHome(".config/1mcp/mcp.json", `{"mcpServers": {"demo": {"command": "demo-mcp"}}}`)
+	h.load()
+	h.selectSetup(func(r suRow) bool { return r.kind == suImport && r.imp == importOneMCP })
+	_, first := h.m.Update(keyMsg("enter"))
+	h.key("esc")
+	_, second := h.m.Update(keyMsg("enter"))
+	h.run(first)
+	if len(h.m.modals) != 0 || !h.m.busy(importWork(importOneMCP)) {
+		t.Fatalf("stale preview applied (modals %d, busy %v)", len(h.m.modals), h.m.busy(importWork(importOneMCP)))
+	}
+	h.run(second)
+	if len(h.m.modals) != 1 || h.m.busy(importWork(importOneMCP)) {
+		t.Fatalf("second preview: modals %d busy %v", len(h.m.modals), h.m.busy(importWork(importOneMCP)))
+	}
+}
+
+func TestCommandName(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "skilltri")
+	os.WriteFile(bin, nil, 0o755)
+	link := filepath.Join(t.TempDir(), "skilltri")
+	os.Symlink(bin, link)
+	found := func(p string) func(string) (string, error) {
+		return func(string) (string, error) { return p, nil }
+	}
+	missing := func(string) (string, error) { return "", errors.New("not found") }
+	for _, c := range []struct {
+		bin  string
+		look func(string) (string, error)
+		want string
+	}{
+		{bin, found(bin), "skilltri"},
+		{bin, found(link), "skilltri"}, // PATH has a symlink to it
+		{bin, found("/usr/local/bin/skilltri"), bin},
+		{bin, missing, bin},
+		{"/opt/my tools/skilltri", missing, "'/opt/my tools/skilltri'"},
+	} {
+		if got := commandName(c.bin, c.look); got != c.want {
+			t.Errorf("commandName(%q) = %q, want %q", c.bin, got, c.want)
+		}
+	}
+	if got := hookLine("bash", "skilltri"); got != `eval "$(skilltri shell-init bash)"` {
+		t.Errorf("hookLine = %q", got)
+	}
+}
+
+// A wide rune in a one-cell column must not hang the wrapping.
+func TestWrapWideRuneNarrow(t *testing.T) {
+	if got := wrapCode("日本", 1); len(got) != 2 {
+		t.Errorf("wrapCode = %q", got)
+	}
+	if got := wrap("日本", 1); len(got) != 2 {
+		t.Errorf("wrap = %q", got)
 	}
 }

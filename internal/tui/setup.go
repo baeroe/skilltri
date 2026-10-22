@@ -88,12 +88,33 @@ func (r suRow) selectable() bool { return r.kind > suBlank }
 // shells are the shells skilltri has a hook for.
 var shells = []string{"zsh", "bash", "fish"}
 
-// hookLine is the rc-file line that loads the shell hook.
-func hookLine(shell string) string {
-	if shell == "fish" {
-		return "skilltri shell-init fish | source"
+// commandName is how the Setup lines call skilltri: "skilltri" when that resolves on PATH (with
+// lookPath) to bin, else bin itself, shell-quoted.
+func commandName(bin string, lookPath func(string) (string, error)) string {
+	if p, err := lookPath("skilltri"); err == nil && sameFile(p, bin) {
+		return "skilltri"
 	}
-	return `eval "$(skilltri shell-init ` + shell + `)"`
+	if bin == "" {
+		return "skilltri"
+	}
+	return shellQuote(bin)
+}
+
+func sameFile(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ra, err1 := filepath.EvalSymlinks(a)
+	rb, err2 := filepath.EvalSymlinks(b)
+	return err1 == nil && err2 == nil && ra == rb
+}
+
+// hookLine is the rc-file line that loads the shell hook, calling skilltri as cmd.
+func hookLine(shell, cmd string) string {
+	if shell == "fish" {
+		return cmd + " shell-init fish | source"
+	}
+	return `eval "$(` + cmd + ` shell-init ` + shell + `)"`
 }
 
 // rcFile is where hookLine goes.
@@ -128,7 +149,8 @@ type setupTab struct {
 	seq  int // newest issued scan
 	scan *setupScanMsg
 
-	imp *importModal // the open import preview, if any
+	imp     *importModal // the open import preview, if any
+	readSeq int          // newest import read; older (cancelled or superseded) previews are dropped
 }
 
 func newSetupTab(bin string) *setupTab {
@@ -235,7 +257,7 @@ func (t *setupTab) key(m *Model, key string) tea.Cmd {
 		case suHarness:
 			return copyCmd(m, r.snip.Text, "copied the "+r.snip.Name+" snippet")
 		case suShell:
-			return copyCmd(m, hookLine(r.shell), "copied "+hookLine(r.shell))
+			return copyCmd(m, hookLine(r.shell, m.cmdName), "copied "+hookLine(r.shell, m.cmdName))
 		}
 	case "i":
 		if r.kind == suService {
@@ -259,7 +281,8 @@ func (t *setupTab) key(m *Model, key string) tea.Cmd {
 		}
 	case "esc": // stop waiting for an import's source to be read (not for an apply in flight)
 		for _, k := range []string{importOneMCP, importClaude} {
-			if m.busy(importWork(k)) && (t.imp == nil || !t.imp.applying || t.imp.kind() != k) {
+			if m.busy(importWork(k)) && !t.applying() {
+				t.readSeq++ // the late preview is dropped
 				m.end(importWork(k))
 				m.flash("import "+importTitles[k]+" cancelled", false)
 			}
@@ -267,6 +290,9 @@ func (t *setupTab) key(m *Model, key string) tea.Cmd {
 	}
 	return nil
 }
+
+// applying reports whether an import is being applied (its dialog may be closed already).
+func (t *setupTab) applying() bool { return t.imp != nil && t.imp.applying }
 
 // copyCmd copies text to the clipboard in a command.
 func copyCmd(m *Model, text, done string) tea.Cmd {
@@ -410,7 +436,7 @@ func (t *setupTab) rowLine(m *Model, r suRow, iw int) string {
 		if m.hookShell() == r.shell {
 			icon = goodStyle.Render("●")
 		}
-		extra = dimStyle.Render(hookLine(r.shell))
+		extra = dimStyle.Render(hookLine(r.shell, m.cmdName))
 	case suService:
 		installed := t.scan != nil && t.scan.installed
 		icon, label = mark(installed), "service"
@@ -498,7 +524,7 @@ func (t *setupTab) detailLines(m *Model, iw int) []string {
 		add("shell", r.shell)
 		add("add to", path(rcFile(r.shell)))
 		out = append(out, "")
-		for _, l := range wrapCode(hookLine(r.shell), iw) {
+		for _, l := range wrapCode(hookLine(r.shell, m.cmdName), iw) {
 			out = append(out, codeStyle.Render(l))
 		}
 		out = append(out, "")
@@ -525,7 +551,7 @@ func (t *setupTab) detailLines(m *Model, iw int) []string {
 		}
 		add("binary", path(m.opts.Bin))
 		out = append(out, "")
-		para("", "The service runs `skilltri daemon --wait` at login and restarts it when it fails; harnesses start the daemon on demand without it.", dimStyle.Render)
+		para("", "The service runs `"+m.cmdName+" daemon --wait` at login and restarts it when it fails; harnesses start the daemon on demand without it.", dimStyle.Render)
 	case suAdapter:
 		a := r.adapter
 		on := m.snap.Config != nil && slices.Contains(m.snap.Config.EnabledAdapters(), a.ID)
@@ -556,12 +582,18 @@ func wrapCode(s string, w int) []string {
 	}
 	var out []string
 	for _, line := range strings.Split(san(s), "\n") {
+		start := len(out)
 		for width(line) > w {
 			cut := ansi.Truncate(line, w, "")
+			if cut == "" { // a wide rune in a 1-cell column: take it whole (clamped later)
+				cut = string([]rune(line)[:1])
+			}
 			out = append(out, cut)
 			line = string([]rune(line)[len([]rune(cut)):])
 		}
-		out = append(out, line)
+		if line != "" || len(out) == start { // keep empty lines, not the rest of a cut one
+			out = append(out, line)
+		}
 	}
 	return out
 }

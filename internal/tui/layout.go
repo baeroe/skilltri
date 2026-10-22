@@ -108,7 +108,7 @@ func wrap(s string, w int) []string {
 	s = san(s)
 	var out []string
 	for _, para := range strings.Split(s, "\n") {
-		line := ""
+		line, start := "", len(out)
 		for _, word := range strings.Fields(para) {
 			for width(word) > w {
 				if line != "" {
@@ -116,8 +116,14 @@ func wrap(s string, w int) []string {
 					line = ""
 				}
 				cut := ansi.Truncate(word, w, "")
+				if cut == "" { // a wide rune in a 1-cell column: take it whole (clamped later)
+					cut = string([]rune(word)[:1])
+				}
 				out = append(out, cut)
 				word = string([]rune(word)[len([]rune(cut)):])
+			}
+			if word == "" { // fully cut into lines above
+				continue
 			}
 			switch {
 			case line == "":
@@ -129,7 +135,9 @@ func wrap(s string, w int) []string {
 				line = word
 			}
 		}
-		out = append(out, line)
+		if line != "" || len(out) == start { // keep empty paragraphs, not the rest of a cut word
+			out = append(out, line)
+		}
 	}
 	return out
 }

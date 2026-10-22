@@ -170,6 +170,8 @@ type Model struct {
 	spinStep    int
 
 	quitting bool
+
+	cmdName string // how the Setup tab's lines call skilltri (commandName)
 }
 
 // spinInterval is the spinner's frame time; spinFrames are its ASCII frames.
@@ -291,7 +293,7 @@ func New(o Options) *Model {
 	if o.Tab < 0 || o.Tab >= numTabs {
 		o.Tab = TabServers
 	}
-	m := &Model{opts: o, tab: o.Tab}
+	m := &Model{opts: o, tab: o.Tab, cmdName: commandName(o.Bin, exec.LookPath)}
 	m.tabs[TabServers] = newServersTab()
 	m.tabs[TabSkills] = newSkillsTab()
 	m.tabs[TabPreview] = newPreviewTab(o.Cwd, o.Home)

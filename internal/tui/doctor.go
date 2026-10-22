@@ -109,7 +109,7 @@ func (t *doctorTab) update(m *Model, msg tea.Msg) tea.Cmd {
 				m.flash("doctor cancelled", false)
 			}
 		case "enter":
-			t.jump(m)
+			return t.jump(m)
 		}
 	}
 	return nil
@@ -143,9 +143,9 @@ func doctorSummary(fs []doctor.Finding) string {
 }
 
 // jump opens the server or source the selected finding is about.
-func (t *doctorTab) jump(m *Model) {
+func (t *doctorTab) jump(m *Model) tea.Cmd {
 	if t.idx >= len(t.findings) {
-		return
+		return nil
 	}
 	f := t.findings[t.idx]
 	cfg := m.snap.Config
@@ -154,16 +154,15 @@ func (t *doctorTab) jump(m *Model) {
 	switch {
 	case isSource && (f.Check == "sources" || !isServer):
 		if m.tabs[TabSkills].(*skillsTab).selectSource(m, f.Subject) {
-			m.switchTab(TabSkills)
-			return
+			return m.switchTab(TabSkills)
 		}
 	case isServer:
 		if m.tabs[TabServers].(*serversTab).selectServer(m, f.Subject) {
-			m.switchTab(TabServers)
-			return
+			return m.switchTab(TabServers)
 		}
 	}
 	m.flash(oneLine(f.Subject)+" is not a server or source", true)
+	return nil
 }
 
 // --- view ----------------------------------------------------------------------------------

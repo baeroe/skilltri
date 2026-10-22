@@ -7,12 +7,14 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/baeroe/skilltri/internal/catalog"
 	"github.com/baeroe/skilltri/internal/gateway"
+	"github.com/baeroe/skilltri/internal/harness"
 	"github.com/baeroe/skilltri/internal/skilllock"
 	"github.com/baeroe/skilltri/internal/skills"
 )
@@ -332,6 +334,10 @@ func TestHarnessCheck(t *testing.T) {
 		{"1mcp command", `{"mcpServers":{"skilltri":{"command":"skilltri","args":["mcp"]}},"projects":{"/demo/p":{"mcpServers":{"agg":{"command":"pnpm","args":["dlx","@1mcp/agent"]}}}}}`,
 			[][2]string{{"warning", "/demo/p: agg"}}},
 		{"unparseable", `{not json`, [][2]string{{"info", ".claude.json"}}},
+		// the harness package's rules: an entry named skilltri counts, 1MCP is found in any field
+		{"named skilltri", `{"mcpServers":{"skilltri":{"command":"/opt/demo/gateway"}}}`, nil},
+		{"1mcp in another field", `{"mcpServers":{"skilltri":{"command":"skilltri","args":["mcp"]},"hub":{"type":"http","httpUrl":"http://localhost:3050/mcp"}}}`,
+			[][2]string{{"warning", "hub"}}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -340,6 +346,14 @@ func TestHarnessCheck(t *testing.T) {
 				write(t, filepath.Join(e.Home, ".claude.json"), c.file)
 			}
 			f := expect(t, run(e), "harness", c.want...)
+			// the Setup tab sees the same (harness.Registered / OneMCPRegistered)
+			if c.file != "" && c.name != "unparseable" {
+				missing := slices.ContainsFunc(f, func(x Finding) bool { return x.Subject == "skilltri" })
+				left := slices.ContainsFunc(f, func(x Finding) bool { return x.Severity == "warning" })
+				if harness.Registered(e.Home)[harness.Claude] == missing || slices.Contains(harness.OneMCPRegistered(e.Home), harness.Claude) != left {
+					t.Errorf("doctor and Setup disagree: %+v", f)
+				}
+			}
 			for _, x := range f {
 				if x.Severity == "warning" && !strings.Contains(x.Message, "1MCP still registered") {
 					t.Errorf("message = %q", x.Message)
@@ -396,5 +410,18 @@ func TestRunSorted(t *testing.T) {
 	want := "error/config,error/views,error/views,warning/daemon,info/adapters,info/shell-hook"
 	if got != want {
 		t.Errorf("order = %s, want %s", got, want)
+	}
+}
+
+func TestRunStopsWhenCancelled(t *testing.T) {
+	e := newEnv(t)
+	write(t, e.ConfigPath, `{not json`)
+	if fs := Run(context.Background(), e); !HasError(fs) {
+		t.Fatalf("live context: %+v", fs)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if fs := Run(ctx, e); fs != nil {
+		t.Fatalf("cancelled run returned %+v", fs)
 	}
 }

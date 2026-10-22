@@ -56,7 +56,8 @@ var checks = []func(context.Context, *state) []Finding{
 	checkDuplicates, checkPluginServers, checkHarness, checkShellHook, checkAdapters,
 }
 
-// Run runs every check and returns the findings sorted: errors, warnings, infos; then by Check, Subject.
+// Run runs every check and returns the findings sorted: errors, warnings, infos; then by Check,
+// Subject. It stops between checks when ctx is done and then returns nil.
 func Run(ctx context.Context, e Env) []Finding {
 	s := &state{env: e, vars: map[string]string{}}
 	for _, kv := range e.Environ {
@@ -75,6 +76,9 @@ func Run(ctx context.Context, e Env) []Finding {
 
 	var out []Finding
 	for _, c := range checks {
+		if ctx.Err() != nil {
+			return nil // cancelled: a partial result would look like a clean bill of health
+		}
 		out = append(out, c(ctx, s)...)
 	}
 	rank := map[string]int{Error: 0, Warning: 1, Info: 2}

@@ -6,9 +6,12 @@ package harness
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -72,31 +75,32 @@ func Snippets(bin string) []Snippet {
 	}
 }
 
-// entry is one MCP server entry of a harness config, reduced to what the detection needs.
-type entry struct {
-	name    string
-	command string   // the command (opencode: the first element of its command array)
-	args    []string // its arguments
-	strs    []string // every string value of the entry (URLs, env values, …)
+// Entry is one MCP server entry of a harness config, reduced to what the detection needs.
+type Entry struct {
+	Name    string
+	Project string   // Claude Code: the project folder of a per-project entry ("" = user scope)
+	Command string   // the command (opencode: the first element of its command array)
+	Args    []string // its arguments
+	Strings []string // every string value of the entry (URLs, env values, …)
 }
 
-// skilltri reports whether e registers skilltri: named "skilltri", or running `…/skilltri mcp`.
-func (e entry) skilltri() bool {
-	if e.name == "skilltri" {
+// Skilltri reports whether e registers skilltri: named "skilltri", or running `…/skilltri mcp`.
+func (e Entry) Skilltri() bool {
+	if e.Name == "skilltri" {
 		return true
 	}
-	return filepath.Base(e.command) == "skilltri" && len(e.args) > 0 && e.args[0] == "mcp"
+	return filepath.Base(e.Command) == "skilltri" && len(e.Args) > 0 && e.Args[0] == "mcp"
 }
 
-// oneMCP reports whether e points at the 1MCP endpoint or runs a 1mcp command.
-func (e entry) oneMCP() bool {
+// OneMCP reports whether e points at the 1MCP endpoint or runs a 1mcp command.
+func (e Entry) OneMCP() bool {
 	ep := strings.TrimPrefix(OneMCPEndpoint, "http://")
-	for _, s := range e.strs {
+	for _, s := range e.Strings {
 		if strings.Contains(s, ep) || strings.Contains(s, "localhost:3050/mcp") {
 			return true
 		}
 	}
-	for _, s := range append([]string{e.command}, e.args...) {
+	for _, s := range append([]string{e.Command}, e.Args...) {
 		if strings.Contains(strings.ToLower(s), "1mcp") {
 			return true
 		}
@@ -106,16 +110,10 @@ func (e entry) oneMCP() bool {
 
 // entries reads the MCP server entries of harness id under home (nil when there are none or the
 // files are missing or invalid).
-func entries(home, id string) []entry {
+func entries(home, id string) []Entry {
 	switch id {
 	case Claude:
-		v := readJSON(filepath.Join(home, ".claude.json"))
-		out := jsonEntries(dig(v, "mcpServers"))
-		if projects, ok := dig(v, "projects").(map[string]any); ok {
-			for _, p := range projects {
-				out = append(out, jsonEntries(dig(p, "mcpServers"))...)
-			}
-		}
+		out, _ := ClaudeEntries(home)
 		return out
 	case Gemini:
 		return jsonEntries(dig(readJSON(filepath.Join(home, ".gemini", "settings.json")), "mcpServers"))
@@ -140,7 +138,7 @@ func Registered(home string) map[string]bool {
 	for _, id := range IDs {
 		out[id] = false
 		for _, e := range entries(home, id) {
-			if e.skilltri() {
+			if e.Skilltri() {
 				out[id] = true
 				break
 			}
@@ -155,13 +153,46 @@ func OneMCPRegistered(home string) []string {
 	var out []string
 	for _, id := range IDs {
 		for _, e := range entries(home, id) {
-			if e.oneMCP() {
+			if e.OneMCP() {
 				out = append(out, id)
 				break
 			}
 		}
 	}
 	return out
+}
+
+// ClaudeEntries reads the MCP server entries of ~/.claude.json under home: the user ones and the
+// per-project ones (Entry.Project set), sorted by project and name. A missing file yields none; an
+// unreadable or invalid one an error.
+func ClaudeEntries(home string) ([]Entry, error) {
+	data, err := os.ReadFile(filepath.Join(home, ".claude.json"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var v any
+	if err := json.Unmarshal(stripJSONC(data), &v); err != nil {
+		return nil, err
+	}
+	out := jsonEntries(dig(v, "mcpServers"))
+	if projects, ok := dig(v, "projects").(map[string]any); ok {
+		for dir, p := range projects {
+			for _, e := range jsonEntries(dig(p, "mcpServers")) {
+				e.Project = dir
+				out = append(out, e)
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Project != out[j].Project {
+			return out[i].Project < out[j].Project
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out, nil
 }
 
 // --- JSON ----------------------------------------------------------------------------------
@@ -183,22 +214,22 @@ func dig(v any, key string) any {
 	return m[key]
 }
 
-func jsonEntries(v any) []entry {
+func jsonEntries(v any) []Entry {
 	servers, _ := v.(map[string]any)
-	var out []entry
+	var out []Entry
 	for name, raw := range servers {
 		m, ok := raw.(map[string]any)
 		if !ok {
 			continue
 		}
-		e := entry{name: name, strs: allStrings(m)}
+		e := Entry{Name: name, Strings: allStrings(m)}
 		switch c := m["command"].(type) {
 		case string:
-			e.command = c
-			e.args = strList(m["args"])
+			e.Command = c
+			e.Args = strList(m["args"])
 		case []any: // opencode: the command with its arguments
 			if l := strList(c); len(l) > 0 {
-				e.command, e.args = l[0], l[1:]
+				e.Command, e.Args = l[0], l[1:]
 			}
 		}
 		out = append(out, e)
@@ -304,13 +335,13 @@ func tomlStrings(s string) []string {
 // codexEntries reads the [mcp_servers.NAME] tables of a Codex config.toml line by line: their
 // command, args (also a multi-line array) and the strings of their other keys. Subtables such as
 // [mcp_servers.NAME.env] are not part of the entry.
-func codexEntries(path string) []entry {
+func codexEntries(path string) []Entry {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil
 	}
 	defer f.Close()
-	var out []entry
+	var out []Entry
 	cur := -1 // index in out of the table being read, -1 outside an mcp_servers table
 	inArgs := false
 	sc := bufio.NewScanner(f)
@@ -318,9 +349,9 @@ func codexEntries(path string) []entry {
 	for sc.Scan() {
 		line := sc.Text()
 		if inArgs {
-			out[cur].args = append(out[cur].args, tomlStrings(line)...)
-			out[cur].strs = append(out[cur].strs, tomlStrings(line)...)
-			inArgs = !strings.Contains(line, "]")
+			out[cur].Args = append(out[cur].Args, tomlStrings(line)...)
+			out[cur].Strings = append(out[cur].Strings, tomlStrings(line)...)
+			inArgs = !closesArray(line)
 			continue
 		}
 		if m := tomlTableRE.FindStringSubmatch(line); m != nil {
@@ -330,7 +361,7 @@ func codexEntries(path string) []entry {
 				if s := tomlStrings(name); len(s) == 1 {
 					name = s[0]
 				}
-				out = append(out, entry{name: name})
+				out = append(out, Entry{Name: name})
 				cur = len(out) - 1
 			}
 			continue
@@ -340,16 +371,22 @@ func codexEntries(path string) []entry {
 			continue
 		}
 		vals := tomlStrings(m[2])
-		out[cur].strs = append(out[cur].strs, vals...)
+		out[cur].Strings = append(out[cur].Strings, vals...)
 		switch m[1] {
 		case "command":
 			if len(vals) > 0 {
-				out[cur].command = vals[0]
+				out[cur].Command = vals[0]
 			}
 		case "args":
-			out[cur].args = vals
-			inArgs = strings.HasPrefix(strings.TrimSpace(m[2]), "[") && !strings.Contains(m[2], "]")
+			out[cur].Args = vals
+			inArgs = strings.HasPrefix(strings.TrimSpace(m[2]), "[") && !closesArray(m[2])
 		}
+	}
+	if sc.Err() != nil { // a line too long or a read error: treat the file as not readable
+		return nil
 	}
 	return out
 }
+
+// closesArray reports whether s has a ] outside quoted strings.
+func closesArray(s string) bool { return strings.Contains(tomlStrRE.ReplaceAllString(s, ""), "]") }

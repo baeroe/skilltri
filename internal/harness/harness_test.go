@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -132,5 +133,40 @@ func TestStripJSONC(t *testing.T) {
 	var v map[string]string
 	if err := json.Unmarshal(stripJSONC([]byte(in)), &v); err != nil || v["a"] != "// not a comment" || v["b"] != `x"/*y` {
 		t.Fatalf("%v %v", err, v)
+	}
+}
+
+func TestCodexArgsAndErrors(t *testing.T) {
+	home := t.TempDir()
+	// a ] inside a quoted argument does not end the multi-line array
+	writeFile(t, home, ".codex/config.toml", "[mcp_servers.gw]\ncommand = \"/bin/skilltri\"\nargs = [\n  \"mcp\",\n  \"--x=[a]\",\n  \"@1mcp/agent\"\n]\n")
+	if !Registered(home)[Codex] || len(OneMCPRegistered(home)) != 1 {
+		t.Fatalf("multi-line args: %v %v", Registered(home), OneMCPRegistered(home))
+	}
+	es := codexEntries(filepath.Join(home, ".codex", "config.toml"))
+	if len(es) != 1 || !reflect.DeepEqual(es[0].Args, []string{"mcp", "--x=[a]", "@1mcp/agent"}) {
+		t.Fatalf("entries = %+v", es)
+	}
+	// a line longer than the scanner buffer: the file counts as unreadable
+	writeFile(t, home, ".codex/config.toml", "[mcp_servers.skilltri]\nx = \""+strings.Repeat("a", 2<<20)+"\"\n")
+	if Registered(home)[Codex] {
+		t.Fatal("scanner error ignored")
+	}
+}
+
+func TestClaudeEntries(t *testing.T) {
+	home := t.TempDir()
+	if es, err := ClaudeEntries(home); es != nil || err != nil {
+		t.Fatalf("missing file: %v %v", es, err)
+	}
+	writeFile(t, home, ".claude.json", `{"mcpServers": {"b": {"command": "demo"}, "a": {"url": "https://a.example.com"}},
+		"projects": {"/work/demo": {"mcpServers": {"p": {"command": "skilltri", "args": ["mcp"]}}}}}`)
+	es, err := ClaudeEntries(home)
+	if err != nil || len(es) != 3 || es[0].Name != "a" || es[1].Name != "b" || es[2].Project != "/work/demo" || !es[2].Skilltri() {
+		t.Fatalf("entries = %+v, %v", es, err)
+	}
+	writeFile(t, home, ".claude.json", `{broken`)
+	if _, err := ClaudeEntries(home); err == nil {
+		t.Fatal("invalid file: no error")
 	}
 }
