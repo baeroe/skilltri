@@ -46,8 +46,8 @@ func (d *Daemon) watch(ctx context.Context, last sig) {
 }
 
 // reload loads the config. A parse error keeps the last good config and is reported in status;
-// otherwise servers whose connection changed or that were removed restart, and every session
-// recomputes its set.
+// otherwise servers whose connection changed or that were removed restart, every session
+// recomputes its set and the updater rebuilds the skill catalog.
 func (d *Daemon) reload() {
 	c, err := config.Load(d.o.ConfigPath)
 	if err != nil {
@@ -58,6 +58,7 @@ func (d *Daemon) reload() {
 		return
 	}
 	old := d.cfg.Swap(c)
+	d.haveConfig.Store(true)
 	d.mu.Lock()
 	d.configErr = ""
 	d.mu.Unlock()
@@ -69,4 +70,5 @@ func (d *Daemon) reload() {
 	}
 	d.log.Printf("config reloaded (%d servers)", len(c.Servers))
 	d.refreshAll()
+	d.requestRebuild()
 }

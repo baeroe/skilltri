@@ -11,14 +11,22 @@ import (
 	"sort"
 	"time"
 
+	"github.com/baeroe/skilltri/internal/catalog"
 	"github.com/baeroe/skilltri/internal/config"
 	"github.com/baeroe/skilltri/internal/downstream"
 	"github.com/baeroe/skilltri/internal/gateway"
 	"github.com/baeroe/skilltri/internal/rules"
 )
 
-// controlTimeout bounds one control request, client and daemon side.
+// controlTimeout bounds one control request, client and daemon side; "update" gets updateTimeout.
 const controlTimeout = 30 * time.Second
+
+func timeoutFor(cmd string) time.Duration {
+	if cmd == "update" {
+		return updateTimeout
+	}
+	return controlTimeout
+}
 
 // StatusReply answers the "status" control command.
 type StatusReply struct {
@@ -34,6 +42,22 @@ type StatusReply struct {
 type WhichReply struct {
 	Dir     string
 	Servers []WhichServer
+	Skills  []WhichSkill
+}
+
+// WhichSkill is one catalog skill's decision for the folder. Plugin is the marketplace entry name.
+type WhichSkill struct {
+	ID, Source, Plugin string
+	Decision           rules.Decision
+}
+
+// WhichSkills decides every skill of c for dir (already normalized), sorted by ID.
+func WhichSkills(c *catalog.Catalog, cfg *config.Config, dir string) []WhichSkill {
+	var out []WhichSkill
+	for _, d := range catalog.Evaluate(c, cfg, dir) {
+		out = append(out, WhichSkill{ID: d.Entry.ID, Source: d.Entry.Source, Plugin: d.Entry.Plugin, Decision: d.Decision})
+	}
+	return out
 }
 
 // WhichServer is one configured server's decision for the folder.
@@ -60,18 +84,27 @@ type controlResponse struct {
 // Control sends a control hello to the daemon at socket and decodes the result into reply.
 // V and Kind default to 1 and "control".
 func Control(socket string, h Hello, reply any) error {
+	return control(socket, h, reply, 2*time.Second, timeoutFor(h.Cmd))
+}
+
+// ControlTimeout is Control with timeout bounding both the dial and the whole request.
+func ControlTimeout(socket string, h Hello, reply any, timeout time.Duration) error {
+	return control(socket, h, reply, timeout, timeout)
+}
+
+func control(socket string, h Hello, reply any, dial, total time.Duration) error {
 	if h.V == 0 {
 		h.V = helloVersion
 	}
 	if h.Kind == "" {
 		h.Kind = "control"
 	}
-	conn, err := net.DialTimeout("unix", socket, 2*time.Second)
+	conn, err := net.DialTimeout("unix", socket, dial)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(controlTimeout))
+	_ = conn.SetDeadline(time.Now().Add(total))
 	b, err := json.Marshal(h)
 	if err != nil {
 		return err
@@ -99,7 +132,7 @@ func Control(socket string, h Hello, reply any) error {
 // control answers one control request (or reports a bad hello) and closes the connection.
 func (d *Daemon) control(conn net.Conn, h Hello, herr error) {
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(controlTimeout))
+	_ = conn.SetDeadline(time.Now().Add(timeoutFor(h.Cmd)))
 	var (
 		result any
 		err    = herr
@@ -110,6 +143,8 @@ func (d *Daemon) control(conn net.Conn, h Hello, herr error) {
 			result = d.status()
 		case "which":
 			result, err = d.which(h)
+		case "update":
+			result, err = d.update(h.Args)
 		case "shutdown":
 			defer d.cancel() // after the reply is written; Run then stops like on SIGTERM
 			d.log.Printf("shutdown requested")
@@ -175,7 +210,7 @@ func (d *Daemon) which(h Hello) (WhichReply, error) {
 	for _, s := range d.servers() {
 		states[s.Name] = s.State
 	}
-	reply := WhichReply{Dir: dir}
+	reply := WhichReply{Dir: dir, Skills: WhichSkills(d.Catalog(), cfg, dir)}
 	for _, sd := range gateway.Servers(cfg, dir) {
 		ws := WhichServer{Name: sd.Name, Decision: sd.Decision, State: states[sd.Name]}
 		// A perSession server would start a new instance for this request, so it lists no tools.

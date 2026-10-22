@@ -1,0 +1,12 @@
+{
+  "alpha": {
+    "source": {"source": "github", "repo": "demo/alpha-plugins"},
+    "installLocation": "@HOME@/.claude/plugins/marketplaces/alpha",
+    "lastUpdated": "2026-01-01T00:00:00.000Z"
+  },
+  "beta.local": {
+    "source": {"source": "directory", "path": "/demo/beta"},
+    "installLocation": "@HOME@/.claude/plugins/marketplaces/beta",
+    "lastUpdated": "2026-01-01T00:00:00.000Z"
+  }
+}

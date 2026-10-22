@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -30,7 +31,11 @@ func tmpDir(t *testing.T) string {
 }
 
 // startDaemonLater returns a start func that runs an in-process daemon after delay, stopped at test end.
+// skilltri's own dirs go below dir, so the daemon never touches the real ones.
 func startDaemonLater(t *testing.T, dir string, delay time.Duration, calls *atomic.Int32) func() error {
+	for _, env := range []string{"SKILLTRI_CONFIG_DIR", "SKILLTRI_STATE_DIR", "SKILLTRI_DATA_DIR", "SKILLTRI_CACHE_DIR"} {
+		t.Setenv(env, filepath.Join(dir, env))
+	}
 	return func() error {
 		calls.Add(1)
 		ctx, cancel := context.WithCancel(context.Background())
@@ -212,5 +217,18 @@ func TestRunStopsOnCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return after cancel")
+	}
+}
+
+func TestSkillsNative(t *testing.T) {
+	for in, want := range map[string][]string{
+		"":                          nil,
+		" , ":                       nil,
+		"claude-code":               {"claude-code"},
+		" claude-code, codex ,,amp": {"claude-code", "codex", "amp"},
+	} {
+		if got := SkillsNative(in); !slices.Equal(got, want) {
+			t.Errorf("SkillsNative(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

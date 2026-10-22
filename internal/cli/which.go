@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/baeroe/skilltri/internal/catalog"
 	"github.com/baeroe/skilltri/internal/config"
 	"github.com/baeroe/skilltri/internal/daemon"
 	"github.com/baeroe/skilltri/internal/gateway"
@@ -40,6 +41,9 @@ func Which(w io.Writer, dir string, jsonOut bool) int {
 		reply = daemon.WhichReply{Dir: dir}
 		for _, sd := range gateway.Servers(cfg, dir) {
 			reply.Servers = append(reply.Servers, daemon.WhichServer{Name: sd.Name, Decision: sd.Decision, State: "unknown"})
+		}
+		if c, err := catalog.Load(catalog.Path()); err == nil {
+			reply.Skills = daemon.WhichSkills(c, cfg, dir)
 		}
 	case err != nil:
 		fmt.Fprintf(errOut, "skilltri: which: %v\n", err)
@@ -80,5 +84,19 @@ func renderWhich(w io.Writer, r daemon.WhichReply) {
 			}
 			fmt.Fprintln(w, line)
 		}
+	}
+	if len(r.Skills) > 0 {
+		fmt.Fprintln(w, "\nskills:")
+	}
+	for _, s := range r.Skills {
+		from := s.Source
+		if s.Plugin != "" { // the entry name, which plugin targets use
+			from += ", plugin " + s.Plugin
+		}
+		line := fmt.Sprintf("  %s %s  (%s)", mark(s.Decision.Active), s.ID, from)
+		if !s.Decision.Active {
+			line += "  " + s.Decision.Reason
+		}
+		fmt.Fprintln(w, line)
 	}
 }

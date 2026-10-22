@@ -44,6 +44,8 @@ const poll = 50 * time.Millisecond
 type env struct {
 	dir, cfg, sock, lock string
 	connectRefresh       time.Duration
+	tick                 time.Duration // Options.UpdateTick
+	d                    **Daemon      // set by start
 }
 
 func newEnv(t *testing.T) env {
@@ -53,11 +55,26 @@ func newEnv(t *testing.T) env {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
-	return env{dir: dir, cfg: filepath.Join(dir, "config.json"), sock: filepath.Join(dir, "d.sock"), lock: filepath.Join(dir, "d.lock")}
+	isolateDirs(t, dir)
+	return env{dir: dir, cfg: filepath.Join(dir, "config.json"), sock: filepath.Join(dir, "d.sock"), lock: filepath.Join(dir, "d.lock"), d: new(*Daemon)}
+}
+
+// isolateDirs points skilltri's config, state, data and cache dirs below dir, so the daemon's
+// catalog, checkouts and views never reach the real ones.
+func isolateDirs(t *testing.T, dir string) {
+	t.Helper()
+	for env, sub := range map[string]string{
+		"SKILLTRI_CONFIG_DIR": "config",
+		"SKILLTRI_STATE_DIR":  "state",
+		"SKILLTRI_DATA_DIR":   "data",
+		"SKILLTRI_CACHE_DIR":  "cache",
+	} {
+		t.Setenv(env, filepath.Join(dir, sub))
+	}
 }
 
 func (e env) options() Options {
-	return Options{ConfigPath: e.cfg, SocketPath: e.sock, LockPath: e.lock, Version: "test", PollInterval: poll, ConnectRefresh: e.connectRefresh}
+	return Options{ConfigPath: e.cfg, SocketPath: e.sock, LockPath: e.lock, Version: "test", PollInterval: poll, ConnectRefresh: e.connectRefresh, UpdateTick: e.tick}
 }
 
 // writeConfig writes c as the config file and makes sure its mtime moves forward.
@@ -90,7 +107,9 @@ func (e env) start(t *testing.T) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- New(e.options()).Run(ctx) }()
+	d := New(e.options())
+	*e.d = d
+	go func() { done <- d.Run(ctx) }()
 	t.Cleanup(func() {
 		cancel()
 		select {
@@ -149,6 +168,12 @@ type client struct {
 
 func (e env) connect(t *testing.T, h Hello, roots ...string) *client {
 	t.Helper()
+	return e.connectAs(t, "test-harness", h, roots...)
+}
+
+// connectAs connects a client named clientName; without roots it does not advertise roots.
+func (e env) connectAs(t *testing.T, clientName string, h Hello, roots ...string) *client {
+	t.Helper()
 	conn, err := net.Dial("unix", e.sock)
 	if err != nil {
 		t.Fatal(err)
@@ -163,7 +188,7 @@ func (e env) connect(t *testing.T, h Hello, roots ...string) *client {
 	if len(roots) == 0 {
 		opts.Capabilities = &mcp.ClientCapabilities{}
 	}
-	mc := mcp.NewClient(&mcp.Implementation{Name: "test-harness", Version: "0"}, opts)
+	mc := mcp.NewClient(&mcp.Implementation{Name: clientName, Version: "0"}, opts)
 	for _, r := range roots {
 		mc.AddRoots(&mcp.Root{URI: "file://" + r})
 	}
@@ -176,7 +201,13 @@ func (e env) connect(t *testing.T, h Hello, roots ...string) *client {
 	return c
 }
 
+// tools lists the downstream tools, without the skill fallback's skilltri_ tools.
 func (c *client) tools(t *testing.T) []string {
+	t.Helper()
+	return slices.DeleteFunc(c.allTools(t), func(n string) bool { return strings.HasPrefix(n, "skilltri_") })
+}
+
+func (c *client) allTools(t *testing.T) []string {
 	t.Helper()
 	res, err := c.cs.ListTools(context.Background(), nil)
 	if err != nil {
@@ -557,7 +588,9 @@ func TestShutdownWithPendingHello(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- New(e.options()).Run(ctx) }()
+	d := New(e.options())
+	*e.d = d
+	go func() { done <- d.Run(ctx) }()
 	eventually(t, 5*time.Second, "daemon up", func() bool {
 		return Control(e.sock, Hello{Cmd: "status"}, nil) == nil
 	})
@@ -659,4 +692,33 @@ func TestControlShutdown(t *testing.T) {
 		_, err := os.Stat(e.sock)
 		return errors.Is(err, os.ErrNotExist)
 	})
+}
+
+// The skill fallback is decided by the client name once initialize ran, also for clients
+// without roots; a client of a natively served harness loses the skill tools.
+func TestSkillFallbackFollowsClient(t *testing.T) {
+	e := newEnv(t)
+	skills := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(skills, "alpha"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skills, "alpha", "SKILL.md"), []byte("---\nname: alpha\ndescription: Demo skill alpha.\n---\nBody.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := cfgOf(map[string]*config.Server{})
+	c.Sources = map[string]*config.Source{"demo": {Type: "local", Path: skills}}
+	e.writeConfig(t, c)
+	e.start(t)
+	has := func(cl *client) bool { return slices.Contains(cl.allTools(t), "skilltri_load_skill") }
+
+	plain := e.connectAs(t, "claude-code", Hello{Dir: t.TempDir()})
+	eventually(t, 5*time.Second, "skill tools without SkillsNative", func() bool { return has(plain) })
+
+	native := e.connectAs(t, "claude-code", Hello{Dir: t.TempDir(), SkillsNative: []string{"claude-code"}})
+	other := e.connectAs(t, "other-harness", Hello{Dir: t.TempDir(), SkillsNative: []string{"claude-code"}})
+	eventually(t, 5*time.Second, "skill tools for a non-native client", func() bool { return has(other) })
+	time.Sleep(200 * time.Millisecond) // the post-initialize Refresh of native has run by now
+	if has(native) {
+		t.Fatalf("native client lists the skill tools: %v", native.allTools(t))
+	}
 }

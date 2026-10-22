@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/baeroe/skilltri/internal/catalog"
 	"github.com/baeroe/skilltri/internal/config"
 	"github.com/baeroe/skilltri/internal/downstream"
 	"github.com/baeroe/skilltri/internal/rules"
@@ -28,6 +29,9 @@ type SessionInfo struct {
 	ID         string
 	Dir        string
 	ClientName string
+	// SkillsNative lists the adapter ids whose harnesses got the session's skills natively
+	// (SKILLTRI_SKILLS_NATIVE); their clients get no skill fallback.
+	SkillsNative []string
 }
 
 // Session is one harness connection: an mcp.Server whose tools, prompts and resources are the
@@ -36,6 +40,7 @@ type Session struct {
 	id     string // info.ID, immutable
 	cfg    func() *config.Config
 	mgr    *downstream.Manager
+	skills func(dir string) []catalog.Entry // active skills for a folder; nil: no skill fallback
 	server *mcp.Server
 	ctx    context.Context // cancelled by Close; aborts a running Refresh
 	cancel context.CancelFunc
@@ -59,7 +64,12 @@ type registered struct {
 }
 
 // NewSession returns a session for info; nothing is listed until Refresh. info.Dir is normalized.
-func NewSession(info SessionInfo, cfg func() *config.Config, mgr *downstream.Manager) *Session {
+// skills returns the skills active in a folder (nil: no skill fallback); it is called for the
+// instructions and on every skill tool call (with the current folder), so calls see the current
+// catalog and config. The instructions list the skills
+// active in info.Dir only when info.SkillsNative is empty, since they are fixed before the client
+// name is known.
+func NewSession(info SessionInfo, cfg func() *config.Config, mgr *downstream.Manager, skills func(dir string) []catalog.Entry) *Session {
 	info.Dir = rules.Normalize(info.Dir)
 	var names []string
 	for _, d := range Servers(cfg(), info.Dir) {
@@ -71,14 +81,20 @@ func NewSession(info SessionInfo, cfg func() *config.Config, mgr *downstream.Man
 	if len(names) > 0 {
 		list = strings.Join(names, ", ")
 	}
+	instructions := fmt.Sprintf("skilltri gateway. Tools and prompts are named <server>_<name>. Servers active for %s: %s.", info.Dir, list)
+	if skills != nil && len(info.SkillsNative) == 0 {
+		if l := skillInstructions(skills(info.Dir)); l != "" {
+			instructions += "\n\n" + l
+		}
+	}
 	s := &Session{
-		id: info.ID, cfg: cfg, mgr: mgr, info: info,
+		id: info.ID, cfg: cfg, mgr: mgr, skills: skills, info: info,
 		tools: map[string]registered{}, prompts: map[string]registered{}, resources: map[string]registered{},
 		active: map[string]bool{}, last: newWanted(),
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.server = mcp.NewServer(&mcp.Implementation{Name: "skilltri", Version: Version}, &mcp.ServerOptions{
-		Instructions: fmt.Sprintf("skilltri gateway. Tools and prompts are named <server>_<name>. Servers active for %s: %s.", info.Dir, list),
+		Instructions: instructions,
 		HasTools:     true, HasPrompts: true, HasResources: true,
 		SupportedProtocolVersions: protocolVersions,
 	})
@@ -137,6 +153,7 @@ func (s *Session) Close() {
 type wanted struct {
 	tools     map[string]*mcp.Tool
 	toolSrc   map[string]route
+	local     map[string]mcp.ToolHandler // tools served by the session itself (skill fallback)
 	prompts   map[string]*mcp.Prompt
 	promptSrc map[string]route
 	resources map[string]*mcp.Resource // by URI
@@ -164,7 +181,8 @@ func (s *Session) Refresh(ctx context.Context) error {
 		s.mu.Unlock()
 		return ErrSessionClosed
 	}
-	id, dir := s.id, s.info.Dir
+	info := s.info
+	id, dir := info.ID, info.Dir
 	next := map[string]bool{}
 	var names []string
 	for _, d := range Servers(cfg, dir) {
@@ -200,6 +218,7 @@ func (s *Session) Refresh(ctx context.Context) error {
 		return ErrSessionClosed
 	}
 	w := newWanted()
+	s.addSkillTools(info, w)
 	for i, name := range names { // sorted, so the first server by name wins a collision
 		l := lists[i]
 		switch {
@@ -218,7 +237,7 @@ func (s *Session) Refresh(ctx context.Context) error {
 
 func newWanted() *wanted {
 	return &wanted{
-		tools: map[string]*mcp.Tool{}, toolSrc: map[string]route{},
+		tools: map[string]*mcp.Tool{}, toolSrc: map[string]route{}, local: map[string]mcp.ToolHandler{},
 		prompts: map[string]*mcp.Prompt{}, promptSrc: map[string]route{},
 		resources: map[string]*mcp.Resource{}, resSrc: map[string]string{},
 	}
@@ -325,7 +344,11 @@ func (s *Session) apply(w *wanted) {
 		if s.tools[name] == reg {
 			continue
 		}
-		if err := addSafely(func() { s.server.AddTool(t, s.toolHandler(rt)) }); err != nil {
+		handler := w.local[name]
+		if handler == nil {
+			handler = s.toolHandler(rt)
+		}
+		if err := addSafely(func() { s.server.AddTool(t, handler) }); err != nil {
 			slog.Warn("gateway: skipping tool", "tool", rt.server+"/"+rt.name, "err", err)
 			if _, had := s.tools[name]; had {
 				s.server.RemoveTools(name)

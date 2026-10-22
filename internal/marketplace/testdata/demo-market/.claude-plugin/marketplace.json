@@ -1,0 +1,9 @@
+{
+  "name": "demo-market",
+  "owner": { "name": "Demo Owner" },
+  "plugins": [
+    { "name": "writing", "source": "./plugins/writing", "skills": "./extra-skills" },
+    { "name": "remote-one", "source": { "source": "github", "repo": "demo/remote-one" } },
+    { "name": "pkg", "source": { "source": "npm", "package": "@demo/pkg" } }
+  ]
+}

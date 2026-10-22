@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 
@@ -121,4 +122,16 @@ func Run(ctx context.Context, in io.Reader, out io.Writer, conn net.Conn, h daem
 		return err
 	}
 	return nil
+}
+
+// SkillsNative parses SKILLTRI_SKILLS_NATIVE (a comma list of adapter ids, set by the shell hook)
+// for Hello.SkillsNative: entries trimmed, empty ones dropped.
+func SkillsNative(v string) []string {
+	var out []string
+	for _, id := range strings.Split(v, ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			out = append(out, id)
+		}
+	}
+	return out
 }
