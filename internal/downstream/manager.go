@@ -50,7 +50,7 @@ type Manager struct {
 	mu      sync.Mutex
 	closed  bool
 	servers map[string]*entry
-	wg      sync.WaitGroup // start, watch and stop goroutines; Add only under mu while !closed
+	wg      sync.WaitGroup // start, watch, stop and callback goroutines; Add only under mu
 }
 
 // entry is the state of one server name.
@@ -118,13 +118,13 @@ func (m *Manager) Acquire(ctx context.Context, server, sessionID string) (*Conn,
 		e = &entry{name: server, users: map[string]struct{}{}, insts: map[string]*inst{}}
 		m.servers[server] = e
 	}
+	_, claimed := e.users[sessionID]
 	e.users[sessionID] = struct{}{}
-	var stale *Conn
 	in := e.insts[ikey]
 	if in != nil && (in.key != key || (in.started() && in.conn != nil && in.conn.isDead())) {
 		delete(e.insts, ikey) // a still-starting stale instance is closed by its start goroutine
 		if in.started() {
-			stale = in.conn
+			m.stopAsync(in)
 		}
 		in = nil
 	}
@@ -138,17 +138,20 @@ func (m *Manager) Acquire(ctx context.Context, server, sessionID string) (*Conn,
 		in.idle = nil
 	}
 	m.mu.Unlock()
-	if stale != nil {
-		stale.close()
-	}
 
+	err := ctx.Err()
 	select {
 	case <-in.done:
+		err = in.err
 	case <-ctx.Done():
-		return nil, ctx.Err()
 	}
-	if in.err != nil {
-		return nil, in.err
+	if err != nil {
+		if !claimed { // a failed first Acquire leaves no claim behind
+			m.mu.Lock()
+			m.release(e, sessionID)
+			m.mu.Unlock()
+		}
+		return nil, err
 	}
 	return in.conn, nil
 }
@@ -189,7 +192,6 @@ func (m *Manager) start(e *entry, ikey string, in *inst, cfg *config.Server) {
 func (m *Manager) watch(e *entry, ikey string, in *inst) {
 	defer m.wg.Done()
 	err := in.conn.cs.Wait()
-	close(in.conn.dead)
 	m.mu.Lock()
 	if e.insts[ikey] == in {
 		delete(e.insts, ikey)
@@ -200,7 +202,8 @@ func (m *Manager) watch(e *entry, ikey string, in *inst) {
 		e.err, e.tail = fmt.Sprintf("%s: %s", e.name, msg), in.conn.stderrTail()
 	}
 	m.mu.Unlock()
-	in.conn.close() // reap the process
+	close(in.conn.dead) // after recording the crash, so Status never sees a dead conn without its error
+	in.conn.close()     // reap the process
 }
 
 // listChanged forwards a downstream list_changed to Options.OnListChanged without blocking the
@@ -221,17 +224,26 @@ func (m *Manager) listChanged(server string) {
 	}()
 }
 
-// Release drops sessionID's use of server. Instances nobody uses stop after the idle timeout.
+// Release drops sessionID's use of server. Instances nobody uses stop after the idle timeout;
+// with no idle timeout a perSession instance stops at once and a shared one keeps running.
 func (m *Manager) Release(server, sessionID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	e := m.servers[server]
-	if e == nil {
-		return
+	if e := m.servers[server]; e != nil {
+		m.release(e, sessionID)
 	}
+}
+
+// release drops a claim. Called with mu held.
+func (m *Manager) release(e *entry, sessionID string) {
 	delete(e.users, sessionID)
 	if in := e.insts[sessionID]; in != nil && sessionID != "" {
-		m.scheduleIdle(e, sessionID, in)
+		if m.o.IdleTimeout <= 0 {
+			delete(e.insts, sessionID)
+			m.stopAsync(in)
+		} else {
+			m.scheduleIdle(e, sessionID, in)
+		}
 	}
 	if in := e.insts[""]; in != nil && len(e.users) == 0 {
 		m.scheduleIdle(e, "", in)
@@ -251,11 +263,22 @@ func (m *Manager) scheduleIdle(e *entry, ikey string, in *inst) {
 			return
 		}
 		delete(e.insts, ikey)
-		m.wg.Add(1)
+		m.stopAsync(in)
 		m.mu.Unlock()
+	})
+}
+
+// stopAsync stops an instance already removed from its entry in a tracked goroutine, so callers
+// never wait for a process shutdown. Called with mu held.
+func (m *Manager) stopAsync(in *inst) {
+	if in.started() && in.conn != nil {
+		in.conn.cancel() // the old Conn fails from now on, even before the process is gone
+	}
+	m.wg.Add(1) // safe: after Close no instance is left to stop, so no Add follows Wait
+	go func() {
 		defer m.wg.Done()
 		stopInst(in)
-	})
+	}()
 }
 
 // stopInst closes an instance removed from its entry, waiting for a pending start first.
@@ -275,21 +298,17 @@ func (m *Manager) Restart(server string) {
 		m.mu.Unlock()
 		return
 	}
-	var stop []*inst
 	for k, in := range e.insts {
 		if in.idle != nil {
 			in.idle.Stop()
 		}
 		if in.started() {
-			stop = append(stop, in) // starting ones see they were replaced and close themselves
+			m.stopAsync(in) // starting ones see they were replaced and close themselves
 		}
 		delete(e.insts, k)
 	}
 	e.err, e.tail = "", nil
 	m.mu.Unlock()
-	for _, in := range stop {
-		stopInst(in)
-	}
 }
 
 // Status reports every server the manager has seen, sorted by name.
@@ -308,7 +327,7 @@ func (m *Manager) Status() []ServerStatus {
 				starting = true
 				continue
 			}
-			if in.conn != nil {
+			if in.conn != nil && !in.conn.isDead() {
 				ready = true
 				s.Tools = max(s.Tools, in.conn.toolCount())
 				if s.StderrTail == nil {
@@ -339,19 +358,15 @@ func (m *Manager) Close() {
 	}
 	m.closed = true
 	m.cancel()
-	var stop []*inst
 	for _, e := range m.servers {
 		for k, in := range e.insts {
 			if in.idle != nil {
 				in.idle.Stop()
 			}
-			stop = append(stop, in)
+			m.stopAsync(in) // in parallel; each close cancels the conn's in-flight calls first
 			delete(e.insts, k)
 		}
 	}
 	m.mu.Unlock()
-	for _, in := range stop {
-		stopInst(in)
-	}
 	m.wg.Wait()
 }

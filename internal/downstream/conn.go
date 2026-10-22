@@ -27,8 +27,10 @@ type Conn struct {
 	cs       *mcp.ClientSession
 	stderr   *ring // nil for http
 	timeout  time.Duration
-	lastCall *atomic.Int64 // unix nanos, shared with the server's entry
-	dead     chan struct{} // closed when the session ended
+	lastCall *atomic.Int64   // unix nanos, shared with the server's entry
+	dead     chan struct{}   // closed when the session ended
+	ctx      context.Context // cancelled by close, which aborts in-flight calls
+	cancel   context.CancelFunc
 
 	mu        sync.Mutex
 	gen       uint64 // bumped on every invalidation, so a fetch racing a list_changed is not cached
@@ -41,6 +43,7 @@ type Conn struct {
 // notification invalidated the conn's caches.
 func dial(ctx context.Context, name string, cfg *config.Server, expand func(string) (string, error), lastCall *atomic.Int64, onChanged func()) (*Conn, error) {
 	c := &Conn{server: name, timeout: defaultRequestTimeout, lastCall: lastCall, dead: make(chan struct{})}
+	c.ctx, c.cancel = context.WithCancel(context.Background())
 	if cfg.RequestTimeoutMs > 0 {
 		c.timeout = time.Duration(cfg.RequestTimeoutMs) * time.Millisecond
 	}
@@ -137,20 +140,27 @@ func (c *Conn) isDead() bool {
 	}
 }
 
-// close ends the session (for stdio: closes stdin, then terminates the process) and waits.
-func (c *Conn) close() { _ = c.cs.Close() }
+// close cancels in-flight calls (the SDK only shuts the transport down once no call is pending),
+// then ends the session (for stdio: closes stdin, then terminates the process) and waits.
+func (c *Conn) close() {
+	c.cancel()
+	_ = c.cs.Close()
+}
 
 // do runs fn with the request timeout and turns failures into errors that name the server.
 func (c *Conn) do(ctx context.Context, what string, fn func(ctx context.Context) error) error {
-	if c.isDead() {
+	if c.isDead() || c.ctx.Err() != nil {
 		return fmt.Errorf("%s: %s: connection closed", c.server, what)
 	}
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
+	defer context.AfterFunc(c.ctx, cancel)()
 	err := fn(ctx)
 	switch {
 	case err == nil:
 		return nil
+	case c.ctx.Err() != nil:
+		return fmt.Errorf("%s: %s: connection closed", c.server, what)
 	case errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded):
 		return fmt.Errorf("%s: %s: request timeout after %v", c.server, what, c.timeout)
 	default:

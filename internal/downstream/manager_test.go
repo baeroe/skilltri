@@ -271,8 +271,7 @@ func TestIdleStop(t *testing.T) {
 	}
 	pid := callEcho(t, c1, "x", `{}`).PID
 	m.Release("a", "s1")
-	time.Sleep(300 * time.Millisecond)
-	if s := status(m, "a"); s.State != "stopped" || s.Sessions != 0 {
+	if s := waitState(t, m, "a", "stopped"); s.Sessions != 0 {
 		t.Fatalf("status after idle = %+v", s)
 	}
 	if _, err := c1.CallTool(ctx, "x", nil); err == nil {
@@ -362,7 +361,10 @@ func TestRestartAndConnKeyChange(t *testing.T) {
 	m := NewManager(Options{Lookup: cfg.lookup, Expand: func(v string) (string, error) { return v, nil }})
 	defer m.Close()
 	ctx := context.Background()
-	c1, _ := m.Acquire(ctx, "a", "s1")
+	c1, err := m.Acquire(ctx, "a", "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	m.Restart("a")
 	if _, err := c1.CallTool(ctx, "x", nil); err == nil {
 		t.Fatal("call on restarted conn succeeded")
@@ -445,5 +447,67 @@ func TestCloseLeavesNoGoroutines(t *testing.T) {
 			t.Fatalf("goroutines: %d before, %d after Close\n%s", before, runtime.NumGoroutine(), buf[:runtime.Stack(buf, true)])
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestRestartAndCloseAbortInFlightCalls(t *testing.T) {
+	for _, stop := range []string{"restart", "close"} {
+		t.Run(stop, func(t *testing.T) {
+			m := newManager(t, map[string]*config.Server{"a": stdio(map[string]string{"FAKEMCP_SLOW": "slow:5000"})}, nil)
+			c, err := m.Acquire(context.Background(), "a", "s1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			callErr := make(chan error, 1)
+			go func() {
+				_, err := c.CallTool(context.Background(), "slow", json.RawMessage(`{}`))
+				callErr <- err
+			}()
+			time.Sleep(100 * time.Millisecond) // let the call reach the server
+			start := time.Now()
+			if stop == "restart" {
+				m.Restart("a")
+			} else {
+				m.Close()
+			}
+			if d := time.Since(start); d > time.Second {
+				t.Fatalf("%s took %v", stop, d)
+			}
+			select {
+			case err := <-callErr:
+				if err == nil {
+					t.Fatal("in-flight call succeeded")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("in-flight call still running")
+			}
+		})
+	}
+}
+
+func TestFailedAcquireLeavesNoClaim(t *testing.T) {
+	m := newManager(t, map[string]*config.Server{"a": {Type: "stdio", Command: "/nonexistent"}}, nil)
+	if _, err := m.Acquire(context.Background(), "a", "s1"); err == nil {
+		t.Fatal("Acquire succeeded")
+	}
+	if s := status(m, "a"); s.Sessions != 0 {
+		t.Fatalf("sessions = %d after failed Acquire", s.Sessions)
+	}
+}
+
+func TestPerSessionStopsOnReleaseWithoutIdleTimeout(t *testing.T) {
+	per := stdio(map[string]string{"FAKEMCP_TOOLS": "x"})
+	per.PerSession = true
+	m := newManager(t, map[string]*config.Server{"per": per}, nil)
+	c, err := m.Acquire(context.Background(), "per", "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Release("per", "s1")
+	if s := status(m, "per"); s.State != "stopped" {
+		t.Fatalf("status = %+v", s)
+	}
+	if _, err := c.CallTool(context.Background(), "x", nil); err == nil {
+		t.Fatal("call on released per-session conn succeeded")
 	}
 }
