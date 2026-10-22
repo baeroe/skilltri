@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -36,7 +37,8 @@ type Entry struct {
 }
 
 // PluginServer is an MCP server bundled with a marketplace plugin. Plugin is the entry name,
-// Name the server's key in the plugin, DefHash = DefHash(Def).
+// Name the server's key in the plugin. DefHash is DefHash(Def, commit) with the commit of the
+// plugin's checkout when the server runs code from the plugin folder, else DefHash(Def, "").
 type PluginServer struct {
 	Source  string        `json:"source"`
 	Plugin  string        `json:"plugin"`
@@ -337,6 +339,7 @@ func (b *Builder) assemble(cfg *config.Config, lock *skilllock.Lock) (*Catalog, 
 			}
 			enabled := src.PluginEnabled(e.Name)
 			key, dir, pguard := name, filepath.Join(root, filepath.FromSlash(path.Clean(local))), guard
+			code := st.Commit // the checkout the plugin's files come from ("" for a marketplace folder)
 			if remote != nil {
 				if key, err = pluginKey(name, e.Name); err != nil {
 					warn("plugin %s: %v", e.Name, err)
@@ -356,6 +359,7 @@ func (b *Builder) assemble(cfg *config.Config, lock *skilllock.Lock) (*Catalog, 
 				if !hasCheckout(co) {
 					continue
 				}
+				code = ps.Commit
 				dir, pguard = co, co
 				if remote.Path != "" {
 					dir = filepath.Join(co, filepath.FromSlash(remote.Path))
@@ -379,7 +383,11 @@ func (b *Builder) assemble(cfg *config.Config, lock *skilllock.Lock) (*Catalog, 
 			c.Plugins[pi].Name, c.Plugins[pi].Loaded, c.Plugins[pi].Extras = p.Name, true, p.Extras
 			for _, sn := range sortedKeys(p.Servers) {
 				def := p.Servers[sn]
-				c.Servers = append(c.Servers, PluginServer{Source: name, Plugin: e.Name, Name: sn, Def: def, DefHash: DefHash(def)})
+				h := DefHash(def, "")
+				if runsPluginCode(def, p.Dir) {
+					h = DefHash(def, code)
+				}
+				c.Servers = append(c.Servers, PluginServer{Source: name, Plugin: e.Name, Name: sn, Def: def, DefHash: h})
 			}
 			if !enabled {
 				continue
@@ -477,6 +485,16 @@ func inside(p, root string) (bool, error) {
 		return false, err
 	}
 	return rp == rr || strings.HasPrefix(rp, strings.TrimSuffix(rr, string(filepath.Separator))+string(filepath.Separator)), nil
+}
+
+// runsPluginCode reports whether a server's command, args or cwd point into the plugin folder
+// (${CLAUDE_PLUGIN_ROOT}, already replaced by dir), so it runs code from the plugin checkout.
+func runsPluginCode(s config.Server, dir string) bool {
+	if dir == "" {
+		return false
+	}
+	return strings.Contains(s.Command, dir) || strings.Contains(s.Cwd, dir) ||
+		slices.ContainsFunc(s.Args, func(a string) bool { return strings.Contains(a, dir) })
 }
 
 // pluginKey is the checkout key of a remote plugin; the entry name must be one safe path segment.

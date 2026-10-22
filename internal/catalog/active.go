@@ -1,6 +1,8 @@
 package catalog
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"sort"
 
 	"github.com/baeroe/skilltri/internal/config"
@@ -58,8 +60,16 @@ func Active(c *Catalog, cfg *config.Config, dir string) []Entry {
 	return out
 }
 
-// DefHash identifies a plugin server definition: its connection key.
-func DefHash(s config.Server) string { return s.ConnKey() }
+// DefHash identifies a plugin server definition: its connection key, plus code (the commit of
+// the plugin checkout it runs code from, "" when it runs none), so an update of that code needs
+// review like a changed definition.
+func DefHash(s config.Server, code string) string {
+	if code == "" {
+		return s.ConnKey()
+	}
+	sum := sha256.Sum256([]byte(s.ConnKey() + "\x00" + code))
+	return hex.EncodeToString(sum[:])
+}
 
 // ReviewState compares every config server imported from a plugin (Origin set) with the catalog:
 // "ok" if the plugin still defines it unchanged, "needs-review" if the definition changed, "gone"

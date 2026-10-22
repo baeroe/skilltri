@@ -166,7 +166,7 @@ func TestBuildLocalGitMarketplace(t *testing.T) {
 	var servers []string
 	for _, s := range c.Servers {
 		servers = append(servers, s.Source+"/"+s.Plugin+"/"+s.Name)
-		if s.DefHash != s.Def.ConnKey() || s.DefHash != DefHash(s.Def) {
+		if s.DefHash != s.Def.ConnKey() || s.DefHash != DefHash(s.Def, "") {
 			t.Errorf("server %s: bad DefHash", s.Name)
 		}
 	}
@@ -433,8 +433,8 @@ func TestReviewState(t *testing.T) {
 		return config.Server{}
 	}
 	notes, docs := def("notes"), def("docs")
-	notes.Origin = &config.Origin{Source: "market", Plugin: "writing", Server: "notes", DefHash: DefHash(notes)}
-	docs.Origin = &config.Origin{Source: "market", Plugin: "writing", Server: "docs", DefHash: DefHash(docs)}
+	notes.Origin = &config.Origin{Source: "market", Plugin: "writing", Server: "notes", DefHash: DefHash(notes, "")}
+	docs.Origin = &config.Origin{Source: "market", Plugin: "writing", Server: "docs", DefHash: DefHash(docs, "")}
 	f.cfg.Servers = map[string]*config.Server{"notes": &notes, "my-docs": &docs, "plain": {Type: "stdio", Command: "demo"}}
 
 	if got, want := ReviewState(f.cfg, c), map[string]string{"notes": "ok", "my-docs": "ok"}; !reflect.DeepEqual(got, want) {
@@ -673,5 +673,39 @@ func TestDisabledPluginsNeverFetched(t *testing.T) {
 	}
 	if len(c.Skills) != 0 {
 		t.Fatalf("skills of disabled plugins: %v", ids(c))
+	}
+}
+
+// TestReviewStateCodeChange: a server that runs code from the plugin folder needs review when the
+// plugin's checkout moves, even though its definition text is unchanged.
+func TestReviewStateCodeChange(t *testing.T) {
+	gitEnv(t)
+	plugin := gitRepo(t, map[string]string{
+		".mcp.json":  `{"local":{"command":"${CLAUDE_PLUGIN_ROOT}/bin/serve","args":["--demo"]},"remote":{"command":"demo-remote"}}`,
+		"bin/serve": "#!/bin/sh\necho v1\n",
+	})
+	market := filepath.Join(t.TempDir(), "market")
+	write(t, filepath.Join(market, ".claude-plugin", "marketplace.json"),
+		`{"name": "m", "plugins": [{"name": "code", "source": {"source": "url", "url": "file://`+plugin+`"}}]}`)
+	cfg := &config.Config{Version: 1, Servers: map[string]*config.Server{}, Sources: map[string]*config.Source{
+		"mk": {Type: "marketplace", Path: market},
+	}}
+	b := &Builder{Fetcher: &sources.Fetcher{Root: filepath.Join(t.TempDir(), "sources")}, Lock: filepath.Join(t.TempDir(), "skills.lock")}
+	c := build(t, b, cfg, true)
+	for _, s := range c.Servers {
+		srv := s.Def
+		srv.Origin = &config.Origin{Source: s.Source, Plugin: s.Plugin, Server: s.Name, DefHash: s.DefHash}
+		cfg.Servers[s.Name] = &srv
+	}
+	if got, want := ReviewState(cfg, c), map[string]string{"local": "ok", "remote": "ok"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("review = %v, want %v", got, want)
+	}
+
+	write(t, filepath.Join(plugin, "bin", "serve"), "#!/bin/sh\necho v2\n")
+	run(t, plugin, "commit", "-q", "-am", "new server code")
+	b.SyncSources(context.Background(), cfg, []string{"mk"})
+	c = build(t, b, cfg, false)
+	if got, want := ReviewState(cfg, c), map[string]string{"local": "needs-review", "remote": "ok"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("review after a code change = %v, want %v", got, want)
 	}
 }
