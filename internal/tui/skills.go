@@ -68,7 +68,7 @@ func (t *skillsTab) capturing() bool { return t.filtering }
 
 func (t *skillsTab) hints() []string {
 	h := []string{"a", "add", "e", "edit", "d", "delete", "n", "new skill", "o", "open", "space", "on/off",
-		"u U", "update", "E", "enable server", "enter", "expand", "/", "filter"}
+		"r", "rules", "u U", "update", "E", "enable server", "enter", "expand", "/", "filter"}
 	if t.upd != nil {
 		h = append([]string{"esc", "cancel update"}, h...)
 	}
@@ -295,7 +295,7 @@ func (t *skillsTab) listKey(m *Model, key string) tea.Cmd {
 		return t.newSkill(m)
 	}
 	if r == nil {
-		if strings.Contains(" e d o E ", " "+key+" ") {
+		if strings.Contains(" e d o r E ", " "+key+" ") {
 			m.flash("no source selected (a adds one)", true)
 		}
 		return nil
@@ -327,6 +327,8 @@ func (t *skillsTab) listKey(m *Model, key string) tea.Cmd {
 		return t.edit(m, filepath.Join(n.skill.Skill.Dir, "SKILL.md"))
 	case " ":
 		return t.toggle(m, n)
+	case "r":
+		return t.rules(m, n)
 	case "E":
 		return t.enableServer(m, n)
 	}
@@ -419,6 +421,26 @@ func (t *skillsTab) newSkill(m *Model) tea.Cmd {
 	p.form.layout(m.width)
 	m.openModal(p)
 	return nil
+}
+
+// rules opens the rules dialog of the node; a plugin server row opens that of the config server it
+// was enabled as.
+func (t *skillsTab) rules(m *Model, n *treeNode) tea.Cmd {
+	switch n.kind {
+	case nodeSource:
+		return openRules(m, target.Target{Kind: "source", Source: n.source}, "source "+n.source)
+	case nodePlugin:
+		return openRules(m, target.Target{Kind: "plugin", Source: n.source, Plugin: n.plugin.Plugin},
+			"plugin "+n.plugin.Plugin+" of "+n.source)
+	case nodeSkill:
+		return openRules(m, target.Target{Kind: "skill", Source: n.source, Skill: n.skill.ID},
+			"skill "+n.skill.ID+" of "+n.source)
+	}
+	if n.as == "" {
+		m.flash("enable the server first (E), then edit its rules", true)
+		return nil
+	}
+	return openRules(m, target.Target{Kind: "server", Server: n.as}, "server "+n.as)
 }
 
 // toggle enables or disables the node (servers are switched on the Servers tab).

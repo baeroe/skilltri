@@ -78,6 +78,24 @@ func RuleClear(e Env, t target.Target) error {
 	})
 }
 
+// RuleSet replaces the rule list of the node t with rs (validated; nil clears it), e.g. to put a
+// removed rule back at its old place. A missing tool, plugin or skill entry is made like RuleAdd.
+func RuleSet(e Env, t target.Target, rs []rules.Rule) error {
+	for _, r := range rs {
+		if err := r.Validate(); err != nil {
+			return err
+		}
+	}
+	return e.edit(func(c *config.Config) error {
+		ref, err := resolve(c, t, true)
+		if err != nil {
+			return err
+		}
+		*ref.Rules = append([]rules.Rule(nil), rs...)
+		return nil
+	})
+}
+
 // SetDisabled enables (disabled=false) or disables the node t. The warnings are those of RuleAdd.
 func SetDisabled(e Env, t target.Target, disabled bool) (warnings []string, err error) {
 	err = e.edit(func(c *config.Config) error {

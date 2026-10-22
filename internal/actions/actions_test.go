@@ -451,3 +451,37 @@ func TestRefreshCatalogOffline(t *testing.T) {
 		t.Fatalf("catalog = %+v, %v", c, err)
 	}
 }
+
+func TestRuleSet(t *testing.T) {
+	e := testEnv(t)
+	if err := ServerAdd(e, "alpha", stdio); err != nil {
+		t.Fatal(err)
+	}
+	srv := parse(t, "server/alpha")
+	want := []rules.Rule{{Path: "~/a", Mode: rules.Tree}, {Path: "/b", Mode: rules.Not}}
+	if err := RuleSet(e, srv, want); err != nil {
+		t.Fatal(err)
+	}
+	if got := load(t, e).Servers["alpha"].Rules; len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("rules = %+v", got)
+	}
+	before := raw(t, e)
+	if err := RuleSet(e, srv, []rules.Rule{{Path: "/x", Mode: rules.Only}, {Path: "relative", Mode: rules.Tree}}); err == nil {
+		t.Error("relative path accepted")
+	}
+	if err := RuleSet(e, parse(t, "server/none"), want); !errors.Is(err, ErrNotFound) {
+		t.Errorf("missing server = %v, want ErrNotFound", err)
+	}
+	if !bytes.Equal(before, raw(t, e)) {
+		t.Error("config changed by failed calls")
+	}
+	if err := RuleSet(e, parse(t, "server/alpha/tool/ping"), want[:1]); err != nil {
+		t.Fatal(err)
+	}
+	if got := load(t, e).Servers["alpha"].Tools["ping"]; got == nil || len(got.Rules) != 1 {
+		t.Errorf("tool node = %+v", got)
+	}
+	if err := RuleSet(e, srv, nil); err != nil || len(load(t, e).Servers["alpha"].Rules) != 0 {
+		t.Errorf("clear: %v", err)
+	}
+}

@@ -25,6 +25,7 @@ type field struct {
 	kind                fieldKind
 	help                string            // dim hint below the field
 	input               textinput.Model   // textField
+	paths               *pathInput        // textField with folder completion (nil: none)
 	lines               []textinput.Model // linesField; never empty
 	line                int               // focused line of a linesField
 	placeholder         string
@@ -122,6 +123,13 @@ func (f *form) addText(key, label, value, placeholder string) *field {
 	return f.add(&field{key: key, label: label, kind: textField, input: newInput(value, placeholder)})
 }
 
+// addPath is a text field for a folder with tab completion (see pathInput).
+func (f *form) addPath(key, label, value, placeholder, home string) *field {
+	fl := f.addText(key, label, value, placeholder)
+	fl.paths = &pathInput{home: home}
+	return fl
+}
+
 func (f *form) addChoice(key, label string, choices []string, cur string) *field {
 	fl := &field{key: key, label: label, kind: choiceField, choices: choices}
 	for i, c := range choices {
@@ -193,6 +201,9 @@ func (f *form) focusKey(key string) {
 func (f *form) setFocus(i int) {
 	for _, fl := range f.fields {
 		fl.input.Blur()
+		if fl.paths != nil {
+			fl.paths.clear()
+		}
 		for j := range fl.lines {
 			fl.lines[j].Blur()
 		}
@@ -241,11 +252,18 @@ func (f *form) lastVisible() bool {
 }
 
 // key handles a key; submit=true means the user asked to save (ctrl+s, or enter on the last field).
+// In a path field tab completes the folder and moves on only when there is nothing to complete.
 func (f *form) key(k tea.KeyMsg) (cmd tea.Cmd, submit bool) {
 	if f.busy != "" {
 		return nil, false
 	}
 	fl := f.current()
+	if fl.paths != nil {
+		if k.String() == "tab" && fl.paths.complete(&fl.input) {
+			return nil, false
+		}
+		fl.paths.clear()
+	}
 	switch k.String() {
 	case "ctrl+s":
 		return nil, true
@@ -433,6 +451,11 @@ func (f *form) view(w, h int) string {
 			}
 		default:
 			lines = append(lines, mark+label+ansi.Truncate(fl.input.View(), inW, ""))
+			if fl.paths != nil && focused {
+				for _, l := range fl.paths.candLines(inW) {
+					lines = append(lines, indent+dimStyle.Render(l))
+				}
+			}
 		}
 		if fl.err != "" {
 			for _, l := range wrap("✗ "+fl.err, inW) {

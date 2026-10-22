@@ -54,12 +54,12 @@ func newSourceForm(name string, s *config.Source, home string) *sourceForm {
 			return true
 		}
 	}
-	p := f.addText("path", "Path", tildify(s.Path, home), "absolute folder (or ~/…)")
+	p := f.addPath("path", "Path", tildify(s.Path, home), "absolute folder (or ~/…)", home)
 	p.hidden = is("local", "marketplace")
-	p.help = "marketplace: a path or a url"
+	p.help = "tab completes folders; marketplace: a path or a url"
 	u := f.addText("url", "URL", s.URL, "owner/repo or a git URL")
 	u.hidden = is("git", "marketplace")
-	u.help = p.help
+	u.help = "marketplace: a path or a url"
 	f.startSection("Checkout")
 	r := f.addText("ref", "Ref", s.Ref, "branch, tag or commit (empty: default branch)")
 	r.hidden = is("git", "marketplace")

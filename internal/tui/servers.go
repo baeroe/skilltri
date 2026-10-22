@@ -58,9 +58,9 @@ func (t *serversTab) capturing() bool { return t.filtering }
 
 func (t *serversTab) hints() []string {
 	if t.toolFocus {
-		return []string{"↑↓", "tool", "space", "on/off", "esc", "back"}
+		return []string{"↑↓", "tool", "space", "on/off", "r", "rules", "esc", "back"}
 	}
-	return []string{"a", "add", "e", "edit", "d", "delete", "space", "on/off", "t", "tools", "x", "restart", "A", "accept", "/", "filter"}
+	return []string{"a", "add", "e", "edit", "d", "delete", "space", "on/off", "r", "rules", "t", "tools", "x", "restart", "A", "accept", "/", "filter"}
 }
 
 // --- data ----------------------------------------------------------------------------------
@@ -291,7 +291,7 @@ func (t *serversTab) listKey(m *Model, key string) tea.Cmd {
 	}
 	s := t.server(m)
 	if s == nil {
-		if strings.Contains(" e d x A t enter ", " "+key+" ") {
+		if strings.Contains(" e d r x A t enter ", " "+key+" ") {
 			m.flash("no server selected (a adds one)", true)
 		}
 		return nil
@@ -313,6 +313,8 @@ func (t *serversTab) listKey(m *Model, key string) tea.Cmd {
 		}))
 	case " ":
 		return toggleCmd(m, target.Target{Kind: "server", Server: name}, !s.Disabled, name, "")
+	case "r":
+		return openRules(m, target.Target{Kind: "server", Server: name}, "server "+name)
 	case "t", "enter":
 		items := t.toolItems(m, name)
 		if len(items) == 0 {
@@ -362,6 +364,11 @@ func (t *serversTab) toolKey(m *Model, key string) tea.Cmd {
 		t.toolSel = items[min(i+1, len(items)-1)].name
 	case "k", "up":
 		t.toolSel = items[max(i-1, 0)].name
+	case "r":
+		if !needConfig(m) {
+			return nil
+		}
+		return openRules(m, target.Target{Kind: "tool", Server: t.sel, Tool: items[i].name}, "tool "+items[i].name+" of "+t.sel)
 	case " ", "enter":
 		if !needConfig(m) {
 			return nil
