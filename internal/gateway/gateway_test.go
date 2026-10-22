@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/baeroe/skilltri/internal/catalog"
 	"github.com/baeroe/skilltri/internal/config"
 	"github.com/baeroe/skilltri/internal/downstream"
 	"github.com/baeroe/skilltri/internal/rules"
@@ -97,6 +98,12 @@ func stdio(env map[string]string) *config.Server {
 
 func newHarness(t *testing.T, cfg *config.Config, dir string) *harness {
 	t.Helper()
+	return connectHarness(t, cfg, SessionInfo{ID: "s1", Dir: dir, ClientName: "test"}, nil)
+}
+
+// connectHarness creates a session for info with skills, refreshes it and connects a client.
+func connectHarness(t *testing.T, cfg *config.Config, info SessionInfo, skills func(string) []catalog.Entry) *harness {
+	t.Helper()
 	h := &harness{changed: make(chan string, 16)}
 	h.cfg.Store(cfg)
 	h.mgr = downstream.NewManager(downstream.Options{Lookup: func(name string) (*config.Server, bool) {
@@ -105,7 +112,7 @@ func newHarness(t *testing.T, cfg *config.Config, dir string) *harness {
 	}})
 	t.Cleanup(h.mgr.Close)
 	ctx := context.Background()
-	h.sess = NewSession(SessionInfo{ID: "s1", Dir: dir, ClientName: "test"}, h.cfg.Load, h.mgr)
+	h.sess = NewSession(info, h.cfg.Load, h.mgr, skills)
 	t.Cleanup(h.sess.Close)
 	if err := h.sess.Refresh(ctx); err != nil {
 		t.Fatalf("Refresh: %v", err)
@@ -375,7 +382,7 @@ func TestSessionCloseStopsPerSession(t *testing.T) {
 		IdleTimeout: time.Hour,
 	})
 	t.Cleanup(mgr.Close)
-	sess := NewSession(SessionInfo{ID: "s1", Dir: t.TempDir()}, func() *config.Config { return cfg }, mgr)
+	sess := NewSession(SessionInfo{ID: "s1", Dir: t.TempDir()}, func() *config.Config { return cfg }, mgr, nil)
 	if err := sess.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}

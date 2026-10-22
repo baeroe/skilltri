@@ -16,12 +16,13 @@ const maxHello = 64 << 10
 
 // Hello is the first line (JSON + "\n") a client writes on the socket.
 type Hello struct {
-	V           int      `json:"v"`                     // 1
-	Kind        string   `json:"kind"`                  // "session" | "control"
-	Dir         string   `json:"dir,omitempty"`         // session folder
-	DirExplicit bool     `json:"dirExplicit,omitempty"` // from --cwd/SKILLTRI_CWD: roots never override it
-	Cmd         string   `json:"cmd,omitempty"`         // control: "status" | "which" | "update" | "shutdown"
-	Args        []string `json:"args,omitempty"`
+	V            int      `json:"v"`                     // 1
+	Kind         string   `json:"kind"`                  // "session" | "control"
+	Dir          string   `json:"dir,omitempty"`         // session folder
+	DirExplicit  bool     `json:"dirExplicit,omitempty"` // from --cwd/SKILLTRI_CWD: roots never override it
+	Cmd          string   `json:"cmd,omitempty"`         // control: "status" | "which" | "update" | "shutdown"
+	Args         []string `json:"args,omitempty"`
+	SkillsNative []string `json:"skillsNative,omitempty"` // session: adapter ids that got skills natively (SKILLTRI_SKILLS_NATIVE)
 }
 
 // readHello reads and checks the hello line from r. The bytes after the newline stay in r.

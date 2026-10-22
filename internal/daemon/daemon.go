@@ -261,7 +261,7 @@ func (d *Daemon) handle(conn net.Conn) {
 // serveSession runs one harness MCP session until the client disconnects or the daemon stops.
 func (d *Daemon) serveSession(conn net.Conn, br *bufio.Reader, h Hello) {
 	id := newID()
-	gw := gateway.NewSession(gateway.SessionInfo{ID: id, Dir: h.Dir}, d.cfg.Load, d.mgr)
+	gw := gateway.NewSession(gateway.SessionInfo{ID: id, Dir: h.Dir, SkillsNative: h.SkillsNative}, d.cfg.Load, d.mgr, d.activeSkills)
 	s := &session{gw: gw, kick: make(chan struct{}, 1), roots: make(chan *mcp.ServerSession, 1)}
 	gw.MCPServer().AddReceivingMiddleware(d.initMiddleware(s, h.DirExplicit))
 	if !d.register(id, s) {
@@ -325,6 +325,11 @@ func (d *Daemon) serveSession(conn net.Conn, br *bufio.Reader, h Hello) {
 	d.log.Printf("session %s: closed", id)
 }
 
+// activeSkills returns the skills of the current catalog active in dir.
+func (d *Daemon) activeSkills(dir string) []catalog.Entry {
+	return catalog.Active(d.Catalog(), d.cfg.Load(), dir)
+}
+
 func (d *Daemon) register(id string, s *session) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -343,6 +348,8 @@ func (d *Daemon) unregister(id string) {
 
 // initMiddleware records the client name from initialize and, unless the folder is explicit,
 // asks the session worker to follow the client's roots on initialized and on roots/list_changed.
+// On initialized it also hands the client name to the gateway session and, when the session has
+// SkillsNative (so the skill fallback depends on the client), asks for a Refresh.
 func (d *Daemon) initMiddleware(s *session, explicit bool) mcp.Middleware {
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
@@ -359,7 +366,17 @@ func (d *Daemon) initMiddleware(s *session, explicit bool) mcp.Middleware {
 			if s.client == "" && p.ClientInfo != nil {
 				s.client = p.ClientInfo.Name
 			}
+			client := s.client
 			d.mu.Unlock()
+			if err == nil && method == "notifications/initialized" {
+				s.gw.SetClient(client)
+				if len(s.gw.Info().SkillsNative) > 0 {
+					select {
+					case s.kick <- struct{}{}:
+					default: // a Refresh is already pending; it sees the client name
+					}
+				}
+			}
 			roots := method == "notifications/initialized" || method == "notifications/roots/list_changed"
 			if err == nil && roots && !explicit && p.Capabilities != nil && p.Capabilities.RootsV2 != nil {
 				select {

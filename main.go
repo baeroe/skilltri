@@ -149,7 +149,7 @@ func runDaemon(args []string) int {
 // roots never override it), else the working directory.
 func runMCP(args []string) int {
 	const usageMsg = "usage: skilltri mcp [--cwd DIR]\n"
-	h := daemon.Hello{V: 1, Kind: "session"}
+	h := daemon.Hello{V: 1, Kind: "session", SkillsNative: shim.SkillsNative(os.Getenv(hook.NativeVar))}
 	for i := 0; i < len(args); i++ {
 		switch a := args[i]; {
 		case a == "--cwd" && i+1 < len(args):

@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -216,5 +217,18 @@ func TestRunStopsOnCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return after cancel")
+	}
+}
+
+func TestSkillsNative(t *testing.T) {
+	for in, want := range map[string][]string{
+		"":                          nil,
+		" , ":                       nil,
+		"claude-code":               {"claude-code"},
+		" claude-code, codex ,,amp": {"claude-code", "codex", "amp"},
+	} {
+		if got := SkillsNative(in); !slices.Equal(got, want) {
+			t.Errorf("SkillsNative(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

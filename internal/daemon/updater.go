@@ -175,8 +175,9 @@ func (d *Daemon) setCatalog(ctx context.Context, c *catalog.Catalog, save bool) 
 	d.cat.Store(c)
 	if old != nil {
 		d.log.Printf("catalog changed (%d skills)", len(c.Skills))
-		d.refreshAll()
 	}
+	d.refreshAll() // also for the first catalog: sessions may already be serving
+
 }
 
 // sameCatalog reports whether a and b differ at most in Built.

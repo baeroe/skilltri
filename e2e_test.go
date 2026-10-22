@@ -165,7 +165,14 @@ func noRoots() *mcp.ClientOptions {
 	return &mcp.ClientOptions{Capabilities: &mcp.ClientCapabilities{}}
 }
 
+// toolNames lists the session's downstream tools, without the skill fallback's skilltri_ tools
+// (see TestMCPSkillFallback).
 func toolNames(t *testing.T, cs *mcp.ClientSession) []string {
+	t.Helper()
+	return slices.DeleteFunc(allToolNames(t, cs), func(n string) bool { return strings.HasPrefix(n, "skilltri_") })
+}
+
+func allToolNames(t *testing.T, cs *mcp.ClientSession) []string {
 	t.Helper()
 	res, err := cs.ListTools(context.Background(), nil)
 	if err != nil {
@@ -232,6 +239,32 @@ func TestMCPEndToEnd(t *testing.T) {
 	explicit := sb.connect(t, sub, nil, "--cwd", proj)
 	if got, want := toolNames(t, explicit), []string{"alpha_ping", "beta_pong"}; !slices.Equal(got, want) {
 		t.Errorf("tools with --cwd %s = %v, want %v", proj, got, want)
+	}
+}
+
+// Without SKILLTRI_SKILLS_NATIVE every session gets the skill fallback.
+func TestMCPSkillFallback(t *testing.T) {
+	sb := newSandbox(t)
+	skills := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(skills, "alpha"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skills, "alpha", "SKILL.md"), []byte("---\nname: alpha\ndescription: Demo skill alpha.\n---\nAlpha body.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sb.writeConfig(t, &config.Config{Version: 1, Servers: map[string]*config.Server{}, Sources: map[string]*config.Source{
+		"demo": {Type: "local", Path: skills},
+	}})
+	cs := sb.connect(t, t.TempDir(), noRoots())
+	if got := allToolNames(t, cs); !slices.Contains(got, "skilltri_load_skill") || !slices.Contains(got, "skilltri_read_skill_file") {
+		t.Fatalf("tools = %v, want the skill tools", got)
+	}
+	if instr := cs.InitializeResult().Instructions; !strings.Contains(instr, "- alpha: Demo skill alpha.") {
+		t.Errorf("instructions = %q", instr)
+	}
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "skilltri_load_skill", Arguments: map[string]any{"name": "alpha"}})
+	if err != nil || res.IsError || !strings.Contains(res.Content[0].(*mcp.TextContent).Text, "Alpha body.") {
+		t.Fatalf("load_skill: %v %+v", err, res)
 	}
 }
 
