@@ -321,7 +321,7 @@ func (t *serversTab) listKey(m *Model, key string) tea.Cmd {
 			dimStyle.Render("Its rules and tool settings go too.")}
 		m.openModal(confirmDanger("Remove server", body, "remove", func(m *Model) tea.Cmd {
 			env := m.opts.Env
-			return m.act("server:"+name, "removing "+name+" …", true, func() (string, error) {
+			return m.act(serverWork(name), "removing "+name+" …", true, func() (string, error) {
 				return "removed " + name, actions.ServerRemove(env, name)
 			})
 		}))
@@ -458,7 +458,7 @@ func (t *serversTab) accept(m *Model, name string, s *config.Server) tea.Cmd {
 	body = append(body, "", dimStyle.Render("Rules, tools and flags stay."))
 	env := m.opts.Env
 	m.openModal(&confirmModal{title: "Accept plugin server", body: body, yes: "accept", color: cYellow, run: func(m *Model) tea.Cmd {
-		return m.act("server:"+name, "accepting "+name+" …", true, func() (string, error) {
+		return m.act(serverWork(name), "accepting "+name+" …", true, func() (string, error) {
 			return "accepted the new plugin definition of " + name, actions.PluginServerAccept(env, name)
 		})
 	}})

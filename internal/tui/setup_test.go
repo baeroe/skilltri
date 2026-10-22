@@ -448,9 +448,13 @@ func TestSetupImportOneAtATime(t *testing.T) {
 	_, apply := h.m.Update(keyMsg("y"))
 	h.key("esc", "j") // close the dialog, select the Claude import
 	_, read := h.m.Update(keyMsg("enter"))
-	// the footer shows the running import's spinner over the flash
-	if read != nil || h.m.busy(importWork(importClaude)) || h.m.status != "another import is running" || !strings.Contains(screen(h), "importing from 1MCP") {
+	// the refusal shows over the running import's spinner until it expires
+	if read != nil || h.m.busy(importWork(importClaude)) || !strings.Contains(screen(h), "another import is running") {
 		t.Fatalf("second import started:\n%s", screen(h))
+	}
+	h.now = h.now.Add(statusTTL)
+	if !strings.Contains(screen(h), "importing from 1MCP") {
+		t.Fatalf("spinner not back after the flash expired:\n%s", screen(h))
 	}
 	h.run(apply)
 	if h.m.busy(importWork(importOneMCP)) || h.m.busy(importWork(importClaude)) || len(h.m.busyKeys) != 0 {

@@ -166,8 +166,11 @@ type Model struct {
 	busyKeys    []string          // pending work, oldest first (see begin)
 	busyText    map[string]string // its status text
 	busyPassive map[string]bool   // keys started with beginPassive
-	spinning    bool              // a spinMsg is scheduled
-	spinStep    int
+	// msgSeq orders flashes and non-passive busy starts: a flash newer than the newest busy start
+	// shows over the spinner until it expires (flashSeq > busySeq).
+	msgSeq, flashSeq, busySeq int
+	spinning                  bool // a spinMsg is scheduled
+	spinStep                  int
 
 	quitting bool
 
@@ -201,6 +204,9 @@ func (m *Model) startBusy(key, text string, passive bool) bool {
 	m.busyText[key] = text
 	if passive {
 		m.busyPassive[key] = true
+	} else {
+		m.msgSeq++
+		m.busySeq = m.msgSeq
 	}
 	return true
 }
@@ -369,6 +375,8 @@ func (m *Model) refreshStatus() tea.Cmd {
 // flash shows text in the status line; it clears itself after statusTTL.
 func (m *Model) flash(text string, isErr bool) {
 	m.status, m.statusErr, m.statusAt = oneLine(text), isErr, m.opts.Now()
+	m.msgSeq++
+	m.flashSeq = m.msgSeq
 }
 
 // statusText is the current status line text ("" when none or expired).
@@ -654,7 +662,7 @@ func (m *Model) footer(w int) string {
 	if m.statusErr {
 		st = badStyle
 	}
-	if b := m.busyLine(false); b != "" {
+	if b := m.busyLine(false); b != "" && (status == "" || m.flashSeq < m.busySeq) {
 		status, st = b, warnStyle
 	} else if b := m.busyLine(true); b != "" && status == "" {
 		status, st = b, warnStyle

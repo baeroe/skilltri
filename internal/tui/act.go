@@ -24,11 +24,12 @@ type actionMsg struct {
 	status bool // the daemon state changed: refresh the status
 }
 
-// act runs fn in a command as the busy work key (nil while key is already running); the Model
-// reports its text or error in the status line and reloads the snapshot when reload is set and fn
-// succeeded.
+// act runs fn in a command as the busy work key (nil, flashing "still working on …", while key is
+// already running); the Model reports its text or error in the status line and reloads the
+// snapshot when reload is set and fn succeeded.
 func (m *Model) act(key, busy string, reload bool, fn func() (string, error)) tea.Cmd {
 	if !m.begin(key, busy) {
+		m.flash("still working on "+strings.TrimSuffix(m.busyText[key], " …"), true)
 		return nil
 	}
 	return func() tea.Msg {
@@ -63,7 +64,7 @@ func toggleCmd(m *Model, tg target.Target, disabled bool, what, note string) tea
 	if disabled {
 		verb = "disabling "
 	}
-	return m.act(tg.String(), verb+what+" …", true, func() (string, error) {
+	return m.act(nodeWork(tg), verb+what+" …", true, func() (string, error) {
 		warns, err := actions.SetDisabled(env, tg, disabled)
 		text := "enabled " + what + note
 		if disabled {
@@ -75,6 +76,18 @@ func toggleCmd(m *Model, tg target.Target, disabled bool, what, note string) tea
 		return text, err
 	})
 }
+
+// nodeWork is the busy key of an action on node tg: a server's is serverWork, so removing,
+// accepting and toggling it cannot run in parallel.
+func nodeWork(tg target.Target) string {
+	if tg.Kind == "server" {
+		return serverWork(tg.Server)
+	}
+	return tg.String()
+}
+
+// serverWork is the busy key of an action on the server name.
+func serverWork(name string) string { return "server:" + name }
 
 // needConfig flashes why the config cannot be changed (false) when it did not load.
 func needConfig(m *Model) bool {

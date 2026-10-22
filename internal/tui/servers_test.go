@@ -652,3 +652,32 @@ func TestWhichRetriedOnTick(t *testing.T) {
 		t.Errorf("which not retried on the tick:\n%s", v)
 	}
 }
+
+// TestPendingServerActionRefusesAnother: a second toggle or a remove while the server's toggle is
+// still pending says so instead of silently doing nothing or running in parallel.
+func TestPendingServerActionRefusesAnother(t *testing.T) {
+	h := newHarness(t, TabServers)
+	h.writeConfig(demoConfig(2))
+	h.load()
+	_, pending := h.m.Update(keyMsg(" ")) // the toggle's command is not run yet
+	if pending == nil {
+		t.Fatal("toggle started nothing")
+	}
+	if _, cmd := h.m.Update(keyMsg(" ")); cmd != nil {
+		t.Fatal("a second toggle started while the first is pending")
+	}
+	if v := screen(h); !strings.Contains(v, "still working on disabling demo-1") {
+		t.Errorf("second toggle not reported:\n%s", v)
+	}
+	h.key("d")
+	if _, cmd := h.m.Update(keyMsg("y")); cmd != nil {
+		t.Fatal("remove started while the toggle is pending")
+	}
+	if v := screen(h); !strings.Contains(v, "still working on disabling demo-1") {
+		t.Errorf("remove not refused:\n%s", v)
+	}
+	h.run(pending)
+	if c := h.config().Servers["demo-1"]; c == nil || !c.Disabled {
+		t.Fatalf("toggle lost: %+v", c)
+	}
+}
