@@ -164,6 +164,10 @@ func writeAtomic(path string, b []byte) error {
 		f.Close()
 		return err
 	}
+	if err := f.Sync(); err != nil { // the rename must never publish a file whose data is not on disk
+		f.Close()
+		return err
+	}
 	if err := f.Close(); err != nil {
 		return err
 	}
