@@ -520,3 +520,36 @@ func TestWrapWideRuneNarrow(t *testing.T) {
 		t.Errorf("wrap = %q", got)
 	}
 }
+
+// TestSetupHarnessDuplicates: entries in a harness config that skilltri serves too are flagged on
+// the harness row and listed in its details; project-dir adapters carry the parent-folder caveat.
+func TestSetupHarnessDuplicates(t *testing.T) {
+	h := newHarness(t, TabSetup)
+	h.writeHome(".claude.json", `{"mcpServers": {"skilltri": {"command": "/opt/demo/bin/skilltri", "args": ["mcp"]},
+	  "demo-1": {"command": "other"}}, "projects": {"/work/demo": {"mcpServers": {"dd": {"command": "demo-server"}}}}}`)
+	h.writeHome(".cursor/mcp.json", `{"mcpServers": {"weather": {"command": "weather-mcp"}}}`)
+	h.writeConfig(demoConfig(2))
+	h.size(160, 60)
+	h.load()
+	if l := lineWith(h, "✓ Claude Code"); !strings.Contains(l, "! 2 duplicates") {
+		t.Errorf("claude row: %q", l)
+	}
+	if l := lineWith(h, "Cursor "); strings.Contains(l, "duplicate") {
+		t.Errorf("cursor row: %q", l)
+	}
+	h.selectSetup(func(r suRow) bool { return r.kind == suHarness && r.snip.Harness == "claude" })
+	v := screen(h)
+	for _, want := range []string{"duplicates", "demo-1 (same name as demo-1)", "dd in /work/demo (same command as demo-1)", "skilltri serves"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("claude details lack %q:\n%s", want, v)
+		}
+	}
+	h.selectSetup(func(r suRow) bool { return r.kind == suAdapter && r.adapter.ID == "codex" })
+	if v := screen(h); !strings.Contains(v, "parent folders") {
+		t.Errorf("project-dir adapter details lack the parent-folder caveat:\n%s", v)
+	}
+	h.selectSetup(func(r suRow) bool { return r.kind == suAdapter && r.adapter.ID == "claude-code" })
+	if v := screen(h); strings.Contains(v, "parent folders") {
+		t.Errorf("claude adapter has the project-dir caveat:\n%s", v)
+	}
+}

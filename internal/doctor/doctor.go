@@ -53,7 +53,7 @@ type state struct {
 // checks run in this order; Run sorts the result.
 var checks = []func(context.Context, *state) []Finding{
 	checkConfig, checkDaemon, checkSources, checkSkills, checkLock, checkViews, checkProjectDirs,
-	checkDuplicates, checkPluginServers, checkHarness, checkShellHook, checkAdapters,
+	checkDuplicates, checkPluginServers, checkHarness, checkHarnessDuplicates, checkShellHook, checkAdapters,
 }
 
 // Run runs every check and returns the findings sorted: errors, warnings, infos; then by Check,

@@ -425,3 +425,29 @@ func TestRunStopsWhenCancelled(t *testing.T) {
 		t.Fatalf("cancelled run returned %+v", fs)
 	}
 }
+
+func TestHarnessDuplicatesCheck(t *testing.T) {
+	e := newEnv(t)
+	write(t, e.ConfigPath, `{"version":1,"servers":{"docs":{"type":"stdio","command":"docs-mcp"},"tracker":{"type":"http","url":"https://tracker.example.test/mcp"}}}`)
+	write(t, filepath.Join(e.Home, ".claude.json"), `{"mcpServers":{"skilltri":{"command":"skilltri","args":["mcp"]},"docs":{"command":"docs-mcp"}},
+	  "projects":{"/demo/p":{"mcpServers":{"t":{"type":"http","url":"https://tracker.example.test/mcp/"}}}}}`)
+	write(t, filepath.Join(e.Home, ".cursor", "mcp.json"), `{"mcpServers":{"d2":{"command":"docs-mcp"}}}`)
+	f := expect(t, run(e), "harness-duplicates",
+		[2]string{"warning", "claude: /demo/p: t"}, [2]string{"warning", "claude: docs"}, [2]string{"warning", "cursor: d2"})
+	cursor := filepath.Join(e.Home, ".cursor", "mcp.json")
+	if f[2].Fix != "remove d2 from "+cursor+"; skilltri serves it" {
+		t.Errorf("fix = %q", f[2].Fix)
+	}
+	if !strings.Contains(f[2].Message, "Cursor") || !strings.Contains(f[2].Message, "docs") || !strings.Contains(f[2].Message, "same command") {
+		t.Errorf("message = %q", f[2].Message)
+	}
+	if !strings.Contains(f[0].Fix, "/demo/p") {
+		t.Errorf("project fix = %q", f[0].Fix)
+	}
+
+	// a disabled skilltri server is no duplicate
+	write(t, e.ConfigPath, `{"version":1,"servers":{"docs":{"type":"stdio","command":"docs-mcp","disabled":true}}}`)
+	write(t, filepath.Join(e.Home, ".claude.json"), `{"mcpServers":{"skilltri":{"command":"skilltri","args":["mcp"]},"docs":{"command":"docs-mcp"}}}`)
+	os.Remove(cursor)
+	expect(t, run(e), "harness-duplicates")
+}

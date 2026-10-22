@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/baeroe/skilltri/internal/actions"
 	"github.com/baeroe/skilltri/internal/adapters"
+	"github.com/baeroe/skilltri/internal/config"
 	"github.com/baeroe/skilltri/internal/daemon"
 	harnesscfg "github.com/baeroe/skilltri/internal/harness"
 	"github.com/baeroe/skilltri/internal/service"
@@ -50,11 +52,13 @@ const (
 )
 
 // setupScanMsg is what the Setup tab reads from the files (in a command): harness registrations,
-// 1MCP leftovers, detected adapters and the service file.
+// 1MCP leftovers, harness entries duplicating skilltri servers, detected adapters and the service
+// file.
 type setupScanMsg struct {
 	seq        int
 	registered map[string]bool
 	oneMCP     []string
+	dups       map[string][]harnesscfg.Duplicate // by harness id
 	detected   map[string]bool
 	installed  bool
 	file       string
@@ -129,10 +133,7 @@ func rcFile(shell string) string {
 }
 
 // harnessNames are the display names of the harness ids.
-var harnessNames = map[string]string{
-	harnesscfg.Claude: "Claude Code", harnesscfg.Codex: "Codex CLI", harnesscfg.Gemini: "Gemini CLI",
-	harnesscfg.OpenCode: "opencode", harnesscfg.Cursor: "Cursor",
-}
+var harnessNames = harnesscfg.Names
 
 // harnessFiles are the user config files the detection reads.
 var harnessFiles = map[string]string{
@@ -207,9 +208,16 @@ func (t *setupTab) startScan(m *Model) tea.Cmd {
 	m.end(setupScanWork)
 	m.beginPassive(setupScanWork, "checking the setup …")
 	seq, home, svc := t.seq, m.opts.Home, m.opts.Service
+	var servers map[string]*config.Server
+	if m.snap.Config != nil {
+		servers = maps.Clone(m.snap.Config.Servers)
+	}
 	return func() tea.Msg {
 		msg := setupScanMsg{seq: seq, registered: harnesscfg.Registered(home), oneMCP: harnesscfg.OneMCPRegistered(home),
-			detected: map[string]bool{}, installed: svc.Installed()}
+			dups: map[string][]harnesscfg.Duplicate{}, detected: map[string]bool{}, installed: svc.Installed()}
+		for _, d := range harnesscfg.Duplicates(home, servers) {
+			msg.dups[d.Harness] = append(msg.dups[d.Harness], d)
+		}
 		for _, a := range adapters.Detected(home) {
 			msg.detected[a.ID] = true
 		}
@@ -415,6 +423,17 @@ func (t *setupTab) oneMCPLeft(id string) bool {
 	return t.scan != nil && slices.Contains(t.scan.oneMCP, id)
 }
 
+// dups are the entries of harness id that duplicate a skilltri server.
+func (t *setupTab) dups(id string) []harnesscfg.Duplicate {
+	if t.scan == nil {
+		return nil
+	}
+	return t.scan.dups[id]
+}
+
+// projectDirCaveat says what a project-dir adapter cannot keep apart.
+const projectDirCaveat = "harnesses also read parent folders up to the repo root: links in a parent repo leak into subfolders"
+
 // rowLine renders a row as "icon label  extra" in iw cells.
 func (t *setupTab) rowLine(m *Model, r suRow, iw int) string {
 	var icon, label, extra string
@@ -428,8 +447,15 @@ func (t *setupTab) rowLine(m *Model, r suRow, iw int) string {
 		if t.scan != nil {
 			icon = mark(t.scan.registered[r.snip.Harness])
 		}
+		var marks []string
 		if t.oneMCPLeft(r.snip.Harness) {
-			extra = warnStyle.Render("! 1MCP")
+			marks = append(marks, "! 1MCP")
+		}
+		if n := len(t.dups(r.snip.Harness)); n > 0 {
+			marks = append(marks, "! "+plural(n, "duplicate"))
+		}
+		if marks != nil {
+			extra = warnStyle.Render(strings.Join(marks, " · "))
 		}
 	case suShell:
 		icon, label = dimStyle.Render("○"), r.shell
@@ -455,7 +481,11 @@ func (t *setupTab) rowLine(m *Model, r suRow, iw int) string {
 		if t.scan != nil && t.scan.detected[r.adapter.ID] {
 			det = "detected"
 		}
-		extra = dimStyle.Render(det + " · " + adapterMethod(r.adapter))
+		method := adapterMethod(r.adapter)
+		if r.adapter.Method == adapters.MethodProjectDir {
+			method += " (+ parent folders)"
+		}
+		extra = dimStyle.Render(det + " · " + method)
 	case suImport:
 		icon, label = accentStyle.Render("▸"), importTitles[r.imp]
 		extra = dimStyle.Render(tildify(importFrom(m, r.imp), m.opts.Home))
@@ -511,6 +541,21 @@ func (t *setupTab) detailLines(m *Model, iw int) []string {
 		if t.oneMCPLeft(r.snip.Harness) {
 			para("1MCP", "! still registered: remove that entry, skilltri replaces it", warnStyle.Render)
 		}
+		if ds := t.dups(r.snip.Harness); len(ds) > 0 {
+			label, files := "duplicates", []string{}
+			for _, d := range ds {
+				where := ""
+				if d.Entry.Project != "" {
+					where = " in " + tildify(san(d.Entry.Project), m.opts.Home)
+				}
+				para(label, "! "+oneLine(d.Entry.Name)+where+" ("+d.Reason+" as "+d.Server+")", warnStyle.Render)
+				label = ""
+				if f := tildify(san(d.Entry.File), m.opts.Home); !slices.Contains(files, f) {
+					files = append(files, f)
+				}
+			}
+			para("", "remove them from "+strings.Join(files, " and ")+"; skilltri serves them", warnStyle.Render)
+		}
 		add("how", val(r.snip.How))
 		out = append(out, "")
 		for _, l := range wrapCode(r.snip.Text, iw) {
@@ -565,6 +610,10 @@ func (t *setupTab) detailLines(m *Model, iw int) []string {
 		add("detected", val(det+" (~/"+strings.Join(a.DetectPaths, ", ~/")+")"))
 		add("method", val(adapterMethod(a)))
 		add("command", val(a.Binary))
+		if a.Method == adapters.MethodProjectDir {
+			out = append(out, "")
+			para("note", projectDirCaveat, dimStyle.Render)
+		}
 	case suImport:
 		add("from", path(importFrom(m, r.imp)))
 		out = append(out, "")

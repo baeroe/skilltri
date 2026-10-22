@@ -343,6 +343,23 @@ func checkHarness(_ context.Context, s *state) []Finding {
 	return out
 }
 
+// checkHarnessDuplicates reports MCP servers registered directly in a harness config that skilltri
+// serves too (same name, command and arguments, or URL): the harness then gets them twice.
+func checkHarnessDuplicates(_ context.Context, s *state) []Finding {
+	var out []Finding
+	for _, d := range harness.Duplicates(s.env.Home, s.cfg.Servers) {
+		subject, where := d.Harness+": "+d.Entry.Name, d.Entry.File
+		if d.Entry.Project != "" {
+			subject = d.Harness + ": " + d.Entry.Project + ": " + d.Entry.Name
+			where = "the " + d.Entry.Project + " project of " + d.Entry.File
+		}
+		out = append(out, Finding{Severity: Warning, Check: "harness-duplicates", Subject: subject,
+			Message: harness.Names[d.Harness] + " registers " + d.Entry.Name + " itself (" + d.Reason + " as skilltri server " + d.Server + "): it runs twice",
+			Fix:     "remove " + d.Entry.Name + " from " + where + "; skilltri serves it"})
+	}
+	return out
+}
+
 func checkShellHook(_ context.Context, s *state) []Finding {
 	if s.vars["SKILLTRI_HOOK"] != "" {
 		return nil

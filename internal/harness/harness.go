@@ -1,6 +1,6 @@
 // Package harness renders the snippets that register `skilltri mcp` with agent harnesses (ported
 // from tussh) and detects, by reading the harnesses' user config files only, whether skilltri is
-// registered and which harnesses still point at 1MCP.
+// registered, which harnesses still point at 1MCP and which entries duplicate a skilltri server.
 package harness
 
 import (
@@ -81,6 +81,8 @@ type Entry struct {
 	Project string   // Claude Code: the project folder of a per-project entry ("" = user scope)
 	Command string   // the command (opencode: the first element of its command array)
 	Args    []string // its arguments
+	URL     string   // the server URL of a remote entry (url, httpUrl or serverUrl)
+	File    string   // the config file the entry was read from
 	Strings []string // every string value of the entry (URLs, env values, …)
 }
 
@@ -116,17 +118,25 @@ func entries(home, id string) []Entry {
 		out, _ := ClaudeEntries(home)
 		return out
 	case Gemini:
-		return jsonEntries(dig(readJSON(filepath.Join(home, ".gemini", "settings.json")), "mcpServers"))
+		return jsonFile(filepath.Join(home, ".gemini", "settings.json"), "mcpServers")
 	case OpenCode:
 		dir := filepath.Join(home, ".config", "opencode")
-		return append(jsonEntries(dig(readJSON(filepath.Join(dir, "opencode.json")), "mcp")),
-			jsonEntries(dig(readJSON(filepath.Join(dir, "opencode.jsonc")), "mcp"))...)
+		return append(jsonFile(filepath.Join(dir, "opencode.json"), "mcp"), jsonFile(filepath.Join(dir, "opencode.jsonc"), "mcp")...)
 	case Cursor:
-		return jsonEntries(dig(readJSON(filepath.Join(home, ".cursor", "mcp.json")), "mcpServers"))
+		return jsonFile(filepath.Join(home, ".cursor", "mcp.json"), "mcpServers")
 	case Codex:
 		return codexEntries(filepath.Join(home, ".codex", "config.toml"))
 	}
 	return nil
+}
+
+// jsonFile reads the entries under key of the JSON(C) file at path, with File set.
+func jsonFile(path, key string) []Entry {
+	out := jsonEntries(dig(readJSON(path), key))
+	for i := range out {
+		out[i].File = path
+	}
+	return out
 }
 
 // Registered reports, per harness id, whether its user config under home has an MCP server entry
@@ -166,7 +176,8 @@ func OneMCPRegistered(home string) []string {
 // per-project ones (Entry.Project set), sorted by project and name. A missing file yields none; an
 // unreadable or invalid one an error.
 func ClaudeEntries(home string) ([]Entry, error) {
-	data, err := os.ReadFile(filepath.Join(home, ".claude.json"))
+	path := filepath.Join(home, ".claude.json")
+	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
@@ -185,6 +196,9 @@ func ClaudeEntries(home string) ([]Entry, error) {
 				out = append(out, e)
 			}
 		}
+	}
+	for i := range out {
+		out[i].File = path
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Project != out[j].Project {
@@ -223,6 +237,12 @@ func jsonEntries(v any) []Entry {
 			continue
 		}
 		e := Entry{Name: name, Strings: allStrings(m)}
+		for _, k := range []string{"url", "httpUrl", "serverUrl"} {
+			if u, ok := m[k].(string); ok && u != "" {
+				e.URL = u
+				break
+			}
+		}
 		switch c := m["command"].(type) {
 		case string:
 			e.Command = c
@@ -361,7 +381,7 @@ func codexEntries(path string) []Entry {
 				if s := tomlStrings(name); len(s) == 1 {
 					name = s[0]
 				}
-				out = append(out, Entry{Name: name})
+				out = append(out, Entry{Name: name, File: path})
 				cur = len(out) - 1
 			}
 			continue
@@ -376,6 +396,10 @@ func codexEntries(path string) []Entry {
 		case "command":
 			if len(vals) > 0 {
 				out[cur].Command = vals[0]
+			}
+		case "url":
+			if len(vals) > 0 {
+				out[cur].URL = vals[0]
 			}
 		case "args":
 			out[cur].Args = vals
