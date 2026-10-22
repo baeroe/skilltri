@@ -89,7 +89,11 @@ func renderWhich(w io.Writer, r daemon.WhichReply) {
 		fmt.Fprintln(w, "\nskills:")
 	}
 	for _, s := range r.Skills {
-		line := fmt.Sprintf("  %s %s  (%s)", mark(s.Decision.Active), s.ID, s.Source)
+		from := s.Source
+		if s.Plugin != "" { // the entry name, which plugin targets use
+			from += ", plugin " + s.Plugin
+		}
+		line := fmt.Sprintf("  %s %s  (%s)", mark(s.Decision.Active), s.ID, from)
 		if !s.Decision.Active {
 			line += "  " + s.Decision.Reason
 		}

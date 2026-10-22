@@ -52,8 +52,8 @@ Usage:
   skilltri source add local NAME PATH
   skilltri source add git NAME URL [--ref R] [--subpath P] [--every D]
   skilltri source add marketplace NAME URL|PATH [--ref R] [--every D] [--plugins enabled|disabled]
-                            --plugins disabled: only plugins you enable get fetched
-                            add a skill source (git and marketplace are fetched by "update")
+                            add a skill source (git and marketplace are fetched by "update";
+                            --plugins disabled: only plugins you enable are fetched)
   skilltri source remove NAME
   skilltri source list [--json]
   skilltri skill new NAME   create a local skill in the config folder's skills/ directory
@@ -62,6 +62,7 @@ Usage:
   skilltri rule remove TARGET INDEX|all
   skilltri rule list [TARGET] [--json]
   skilltri enable TARGET    TARGET: server/N[/tool/T] or source/N[/plugin/P|/skill/ID]
+                            (P: marketplace entry name; ID of a plugin skill: <plugin>:<skill>)
   skilltri disable TARGET
   skilltri plugin-server list [--json]
                             MCP servers bundled with marketplace plugins

@@ -399,3 +399,50 @@ func TestWhichSkills(t *testing.T) {
 		t.Errorf("human output:\n%s", s)
 	}
 }
+
+func TestUnknownTargetWarnings(t *testing.T) {
+	errs := sandbox(t)
+	var out bytes.Buffer
+	SourceAdd(&out, "m", config.Source{Type: "marketplace", Path: demoMarketCopy(t)})
+	for _, tc := range []struct {
+		do   func() int
+		want []string // "" = no warning
+	}{
+		{func() int { return RuleAdd(&out, "source/m/plugin/writing", "tree", "/x") }, nil},
+		{func() int { return SetDisabled(&out, "source/m/skill/writing-tools:outline", true) }, nil},
+		// the plugin.json name instead of the entry name
+		{func() int { return RuleAdd(&out, "source/m/plugin/writing-tools", "tree", "/x") },
+			[]string{`no plugin "writing-tools"`, "marketplace entry name", "source/m/plugin/writing"}},
+		{func() int { return SetDisabled(&out, "source/m/plugin/writin", false) }, []string{"source/m/plugin/writing"}},
+		// a plugin skill without its prefix
+		{func() int { return SetDisabled(&out, "source/m/skill/outline", true) },
+			[]string{`no skill "outline"`, "<plugin>:<skill>", "source/m/skill/writing-tools:outline"}},
+		{func() int { return RuleAdd(&out, "source/m/skill/nothing-like-it", "tree", "/x") }, []string{`no skill "nothing-like-it"`}},
+	} {
+		errs.Reset()
+		if code := tc.do(); code != 0 {
+			t.Fatalf("exit %d: %s", code, errs)
+		}
+		if len(tc.want) == 0 && errs.Len() > 0 {
+			t.Errorf("unexpected warning: %s", errs)
+		}
+		for _, w := range tc.want {
+			if !strings.Contains(errs.String(), w) {
+				t.Errorf("warning lacks %q: %s", w, errs)
+			}
+		}
+	}
+}
+
+func TestRenderWhichPluginSkill(t *testing.T) {
+	var out bytes.Buffer
+	renderWhich(&out, daemon.WhichReply{Dir: "/w", Skills: []daemon.WhichSkill{
+		{ID: "writing-tools:outline", Source: "m", Plugin: "writing", Decision: rules.Decision{Active: true}},
+		{ID: "alpha", Source: "loc", Decision: rules.Decision{Active: true}},
+	}})
+	for _, want := range []string{"writing-tools:outline  (m, plugin writing)", "alpha  (loc)"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output lacks %q:\n%s", want, out.String())
+		}
+	}
+}

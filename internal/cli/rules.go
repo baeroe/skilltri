@@ -37,6 +37,7 @@ func RuleAdd(w io.Writer, tgt, mode, path string) int {
 		return fail(err)
 	}
 	fmt.Fprintf(w, "added rule %s %s to %s\n", mode, path, t)
+	warnUnknown(t)
 	return 0
 }
 
@@ -167,5 +168,6 @@ func SetDisabled(w io.Writer, tgt string, disabled bool) int {
 		verb = "disabled"
 	}
 	fmt.Fprintf(w, "%s %s\n", verb, t)
+	warnUnknown(t)
 	return 0
 }

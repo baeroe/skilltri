@@ -642,3 +642,32 @@ func TestSourceAddPlugins(t *testing.T) {
 		}
 	}
 }
+
+// TestToolTargetWarning: with a running daemon, disabling a tool the server does not offer warns
+// (exit 0) and suggests the close match.
+func TestToolTargetWarning(t *testing.T) {
+	sb := newSandbox(t)
+	proj, _ := project(t, sb)
+	sb.connect(t, proj, noRoots()) // starts the daemon and alpha
+	cli := func(args ...string) (string, int) {
+		c := exec.Command(skilltriBin, args...)
+		c.Dir, c.Env = proj, sb.env
+		var e strings.Builder
+		c.Stderr = &e
+		err := c.Run()
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			return e.String(), exit.ExitCode()
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		return e.String(), 0
+	}
+	if errOut, code := cli("disable", "server/alpha/tool/pong"); code != 0 || !strings.Contains(errOut, `server alpha has no tool "pong"`) ||
+		!strings.Contains(errOut, "server/alpha/tool/ping") {
+		t.Fatalf("unknown tool: %d %q", code, errOut)
+	}
+	if errOut, code := cli("disable", "server/alpha/tool/ping"); code != 0 || errOut != "" {
+		t.Fatalf("known tool: %d %q", code, errOut)
+	}
+}
