@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -488,7 +489,7 @@ func TestSaveLoad(t *testing.T) {
 	}
 }
 
-func TestFailedFirstFetchRetried(t *testing.T) {
+func TestFailedFirstFetchRetriedAfterInterval(t *testing.T) {
 	f := newFixture(t)
 	good := f.cfg.Sources["repo"].URL
 	f.cfg.Sources["repo"].URL = "file://" + filepath.Join(t.TempDir(), "missing")
@@ -497,9 +498,22 @@ func TestFailedFirstFetchRetried(t *testing.T) {
 		t.Fatal("beta without a checkout")
 	}
 	f.cfg.Sources["repo"].URL = good
-	c = build(t, f.builder, f.cfg, true) // within the interval, but there is no checkout yet
+	c = build(t, f.builder, f.cfg, true) // within the interval: the failed clone waits (backoff)
+	if slices.Contains(ids(c), "beta") {
+		t.Fatalf("failed first fetch retried within the interval: %v", ids(c))
+	}
+	rewindLock(t, f.builder.Lock)
+	c = build(t, f.builder, f.cfg, true)
 	if !slices.Contains(ids(c), "beta") {
-		t.Fatalf("failed first fetch not retried: %v %+v", ids(c), c.Sources)
+		t.Fatalf("failed first fetch not retried after the interval: %v %+v", ids(c), c.Sources)
+	}
+
+	// A checkout that vanished without an error is fetched again at once.
+	if err := os.RemoveAll(f.builder.Fetcher.Dir("repo")); err != nil {
+		t.Fatal(err)
+	}
+	if c = build(t, f.builder, f.cfg, true); !slices.Contains(ids(c), "beta") {
+		t.Fatalf("vanished checkout not re-fetched: %v", ids(c))
 	}
 }
 
@@ -553,5 +567,103 @@ func TestEvaluateSortsUnsortedCatalog(t *testing.T) {
 	got := Evaluate(c, cfg, "/")
 	if got[0].Entry.ID != "a" || got[1].Entry.ID != "b" || c.Skills[0].ID != "b" {
 		t.Fatalf("got %+v, catalog %+v", got, c.Skills)
+	}
+}
+
+// bigMarket is a marketplace (from a folder) with n remote plugins p00…; the first half point at
+// good, the rest at a repo that does not exist. It returns the marketplace folder.
+func bigMarket(t *testing.T, n int, good, dead string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "big-market")
+	var entries []string
+	for i := range n {
+		url := good
+		if i >= n/2 {
+			url = dead
+		}
+		entries = append(entries, fmt.Sprintf(`{"name": "p%02d", "source": {"source": "url", "url": "file://%s"}}`, i, url))
+	}
+	write(t, filepath.Join(dir, ".claude-plugin", "marketplace.json"), `{"name": "big", "plugins": [`+strings.Join(entries, ",\n")+`]}`)
+	return dir
+}
+
+func countLines(t *testing.T, log, prefix string) int {
+	t.Helper()
+	b, err := os.ReadFile(log)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, l := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(l, prefix) {
+			n++
+		}
+	}
+	return n
+}
+
+func TestDisabledPluginsNeverFetched(t *testing.T) {
+	gitEnv(t)
+	good := gitRepo(t, map[string]string{"skills/gamma/SKILL.md": skillFile("gamma")})
+	dead := filepath.Join(t.TempDir(), "dead")
+	market := bigMarket(t, 60, good, dead)
+	log := filepath.Join(t.TempDir(), "git.log")
+	root := filepath.Join(t.TempDir(), "sources")
+	b := &Builder{Fetcher: &sources.Fetcher{Root: root, Git: gitScript(t, log, `exec git "$@"`)}, Lock: filepath.Join(t.TempDir(), "skills.lock")}
+	cfg := &config.Config{Version: 1, Servers: map[string]*config.Server{}, Sources: map[string]*config.Source{
+		"big": {Type: "marketplace", Path: market, PluginsDefault: config.PluginsDisabled,
+			Plugins: map[string]*config.Node{"p01": {}, "p45": {}, "p02": {Disabled: true}}},
+	}}
+
+	c := build(t, b, cfg, true)
+	if n := countLines(t, log, "clone"); n != 2 {
+		t.Fatalf("clones = %d, want 2 (only the enabled p01 and p45)", n)
+	}
+	var states []string
+	for _, s := range c.Sources {
+		states = append(states, s.Name)
+	}
+	if want := []string{"big", "big/plugins/p01", "big/plugins/p45"}; !slices.Equal(states, want) {
+		t.Fatalf("sources = %v, want %v", states, want)
+	}
+	if got := ids(c); !slices.Equal(got, []string{"p01:gamma"}) {
+		t.Fatalf("ids = %v", got)
+	}
+
+	// The dead plugin is not retried within its interval although it has no checkout.
+	build(t, b, cfg, true)
+	if n := countLines(t, log, "clone"); n != 2 {
+		t.Fatalf("clones after a second sync = %d, want 2", n)
+	}
+	// After the interval it is retried.
+	rewindLock(t, b.Lock)
+	build(t, b, cfg, true)
+	if n := countLines(t, log, "clone"); n != 3 {
+		t.Fatalf("clones after the interval = %d, want 3", n)
+	}
+
+	// The default "" enables every plugin without a node.
+	cfg.Sources["big"].PluginsDefault = ""
+	st := b.SyncSources(context.Background(), cfg, []string{"big"})
+	if len(st) != 59 { // p02 stays disabled
+		t.Fatalf("synced %d plugins, want 59", len(st))
+	}
+
+	// A disabled plugin with a checkout keeps its servers and state, but no skills or errors.
+	cfg.Sources["big"].PluginsDefault = config.PluginsDisabled
+	cfg.Sources["big"].Plugins = map[string]*config.Node{"p45": {}}
+	c = build(t, b, cfg, false)
+	i := slices.IndexFunc(c.Sources, func(s SourceState) bool { return s.Name == "big/plugins/p01" })
+	if i < 0 || c.Sources[i].Error != "" || len(c.Sources[i].Commit) != 40 {
+		t.Fatalf("disabled plugin with checkout: %+v", c.Sources)
+	}
+	if slices.ContainsFunc(c.Sources, func(s SourceState) bool { return s.Name == "big/plugins/p50" }) {
+		t.Fatalf("disabled plugin without checkout has a state: %+v", c.Sources)
+	}
+	if len(c.Skills) != 0 {
+		t.Fatalf("skills of disabled plugins: %v", ids(c))
 	}
 }

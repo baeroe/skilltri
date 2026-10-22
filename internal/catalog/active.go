@@ -14,7 +14,7 @@ type Decided struct {
 }
 
 // Levels returns the rule hierarchy of e: [source, plugin (marketplace only), skill]. The plugin
-// level is config.Source.Plugins[e.Plugin] (entry name), the skill level config.Source.Skills[e.ID].
+// level is config.Source.Plugins[e.Plugin] (entry name; off per Source.PluginEnabled), the skill level config.Source.Skills[e.ID].
 // A source missing from cfg yields a disabled source level, so stale catalog entries stay off.
 func Levels(cfg *config.Config, e Entry) []rules.Level {
 	src := cfg.Sources[e.Source]
@@ -23,9 +23,9 @@ func Levels(cfg *config.Config, e Entry) []rules.Level {
 	}
 	levels := []rules.Level{{Name: e.Source, Disabled: src.Disabled, Rules: src.Rules}}
 	if e.Plugin != "" {
-		l := rules.Level{Name: e.Source + "/" + e.Plugin}
+		l := rules.Level{Name: e.Source + "/" + e.Plugin, Disabled: !src.PluginEnabled(e.Plugin)}
 		if n := src.Plugins[e.Plugin]; n != nil {
-			l.Disabled, l.Rules = n.Disabled, n.Rules
+			l.Rules = n.Rules
 		}
 		levels = append(levels, l)
 	}

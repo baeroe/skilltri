@@ -243,7 +243,7 @@ func checkDuplicates(_ context.Context, s *state) []Finding {
 			if src == nil || src.Type != "marketplace" || src.Disabled {
 				continue
 			}
-			if n := src.Plugins[plugin]; n != nil && n.Disabled {
+			if !src.PluginEnabled(plugin) {
 				continue
 			}
 			out = append(out, Finding{Severity: Warning, Check: "duplicates", Subject: key,

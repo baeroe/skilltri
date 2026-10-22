@@ -47,6 +47,16 @@ func TestResolveCreate(t *testing.T) {
 		t.Fatalf("plugin node: %+v", n)
 	}
 
+	// Under pluginsDefault "disabled" a created plugin node keeps the plugin off (a rule alone
+	// must not enable it).
+	cfg.Sources["m"].PluginsDefault = config.PluginsDisabled
+	if _, err := Resolve(cfg, Target{Kind: "plugin", Source: "m", Plugin: "q"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if n := cfg.Sources["m"].Plugins["q"]; n == nil || !n.Disabled || cfg.Sources["m"].PluginEnabled("q") {
+		t.Fatalf("created node under default disabled: %+v", n)
+	}
+
 	ref, err = Resolve(cfg, Target{Kind: "tool", Server: "a", Tool: "t"}, true)
 	if err != nil {
 		t.Fatal(err)

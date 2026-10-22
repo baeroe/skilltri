@@ -199,6 +199,9 @@ func TestSourceValidate(t *testing.T) {
 		{"reserved server name", Config{Version: 1, Servers: map[string]*Server{"skilltri": {Type: "stdio", Command: "x"}}}, false},
 		{"marketplace with path only", Config{Version: 1, Sources: map[string]*Source{"m": {Type: "marketplace", Path: "/x"}}}, true},
 		{"git ok", Config{Version: 1, Sources: map[string]*Source{"g": {Type: "git", URL: "o/r", UpdateEvery: "30m"}}}, true},
+		{"plugins default disabled", Config{Version: 1, Sources: map[string]*Source{"m": {Type: "marketplace", Path: "/x", PluginsDefault: "disabled"}}}, true},
+		{"bad plugins default", Config{Version: 1, Sources: map[string]*Source{"m": {Type: "marketplace", Path: "/x", PluginsDefault: "off"}}}, false},
+		{"plugins default on git", Config{Version: 1, Sources: map[string]*Source{"g": {Type: "git", URL: "o/r", PluginsDefault: "disabled"}}}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -207,6 +210,25 @@ func TestSourceValidate(t *testing.T) {
 				t.Fatalf("ok=%v, err=%v", tc.ok, err)
 			}
 		})
+	}
+}
+
+func TestPluginEnabled(t *testing.T) {
+	on, off := &Source{}, &Source{PluginsDefault: "disabled"}
+	for _, s := range []*Source{on, off} {
+		s.Plugins = map[string]*Node{"yes": {}, "no": {Disabled: true}, "nil": nil}
+	}
+	for _, tc := range []struct {
+		src   *Source
+		entry string
+		want  bool
+	}{
+		{on, "other", true}, {on, "yes", true}, {on, "no", false}, {on, "nil", true},
+		{off, "other", false}, {off, "yes", true}, {off, "no", false}, {off, "nil", false},
+	} {
+		if got := tc.src.PluginEnabled(tc.entry); got != tc.want {
+			t.Errorf("default %q, %s: got %v, want %v", tc.src.PluginsDefault, tc.entry, got, tc.want)
+		}
 	}
 }
 

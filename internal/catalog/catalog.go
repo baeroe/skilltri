@@ -75,9 +75,10 @@ type Builder struct {
 func Path() string { return filepath.Join(paths.CacheDir(), "catalog.json") }
 
 // Build builds the catalog of cfg. With sync=false it reads only existing checkouts and never runs git.
-// With sync=true it first syncs the git and marketplace sources (and remote plugins) that are due:
-// never fetched, without a checkout (e.g. a failed first clone), or fetched longer than the
-// source's interval ago (interval 0 = manual only).
+// With sync=true it first syncs the git and marketplace sources (and the remote plugins that are
+// enabled, see config.Source.PluginEnabled) that are due: never fetched, whose checkout vanished, or
+// fetched longer than the source's interval ago (interval 0 = manual only). A failed attempt is
+// retried after the interval, also when it left no checkout (a failed first clone).
 // A failing source never fails the build: its error goes into SourceState.Error and its last
 // good checkout stays in use. The lock (commit, error, skill hashes) is written for synced sources;
 // an unreadable or unwritable lock only adds a warning. Build currently never returns an error.
@@ -176,12 +177,17 @@ func (b *Builder) sync(ctx context.Context, cfg *config.Config, lock *skilllock.
 		if err != nil {
 			interval = 0
 		}
-		due := func(key string) bool { // listed, never fetched, without a checkout, or the interval passed
-			if listed[name] || !hasCheckout(b.Fetcher.Dir(key)) {
+		// due: listed, never fetched, a checkout that vanished, or the interval passed. A missing
+		// checkout whose last attempt failed waits for the interval like any other retry.
+		due := func(key string) bool {
+			if listed[name] {
 				return true
 			}
 			e, ok := lock.Sources[key]
-			return !ok || e.FetchedAt.IsZero() || (interval > 0 && now.Sub(e.FetchedAt) >= interval)
+			if !ok || e.FetchedAt.IsZero() || (e.Error == "" && !hasCheckout(b.Fetcher.Dir(key))) {
+				return true
+			}
+			return interval > 0 && now.Sub(e.FetchedAt) >= interval
 		}
 		if fetched(src) && due(name) {
 			out[name] = b.syncKey(ctx, lock, name, sources.RepoURL(src.URL), src.Ref)
@@ -198,6 +204,9 @@ func (b *Builder) sync(ctx context.Context, cfg *config.Config, lock *skilllock.
 			continue // assemble reports it
 		}
 		for _, e := range m.Plugins {
+			if !src.PluginEnabled(e.Name) {
+				continue // disabled plugins are never fetched
+			}
 			_, remote, err := marketplace.ParseSource(e.Source)
 			if err != nil || remote == nil {
 				continue
@@ -312,6 +321,7 @@ func (b *Builder) assemble(cfg *config.Config, lock *skilllock.Lock) (*Catalog, 
 				warn("plugin %s: %v", e.Name, err)
 				continue
 			}
+			enabled := src.PluginEnabled(e.Name)
 			key, dir, pguard := name, filepath.Join(root, filepath.FromSlash(path.Clean(local))), guard
 			if remote != nil {
 				if key, err = pluginKey(name, e.Name); err != nil {
@@ -320,7 +330,12 @@ func (b *Builder) assemble(cfg *config.Config, lock *skilllock.Lock) (*Catalog, 
 				}
 				ps := state(key)
 				co := b.Fetcher.Dir(key)
-				if !hasCheckout(co) && ps.Error == "" {
+				switch {
+				case !enabled && !hasCheckout(co):
+					continue // never fetched while disabled: no state, no servers
+				case !enabled:
+					ps.Error = "" // not synced while disabled: an old error is stale
+				case !hasCheckout(co) && ps.Error == "":
 					ps.Error = "not fetched yet"
 				}
 				c.Sources = append(c.Sources, ps)
@@ -351,7 +366,7 @@ func (b *Builder) assemble(cfg *config.Config, lock *skilllock.Lock) (*Catalog, 
 				def := p.Servers[sn]
 				c.Servers = append(c.Servers, PluginServer{Source: name, Plugin: e.Name, Name: sn, Def: def, DefHash: DefHash(def)})
 			}
-			if n := src.Plugins[e.Name]; n != nil && n.Disabled {
+			if !enabled {
 				continue
 			}
 			for i, r := range p.SkillRoots {

@@ -41,16 +41,32 @@ const ReservedName = "skilltri"
 
 // Source is one place skills come from.
 type Source struct {
-	Type        string           `json:"type"`           // "local" | "git" | "marketplace"
-	Path        string           `json:"path,omitempty"` // local folder (local; marketplace from a folder)
-	URL         string           `json:"url,omitempty"`  // "owner/repo" or a git URL (git, marketplace)
-	Ref         string           `json:"ref,omitempty"`  // branch, tag or 40-hex commit (pinned)
-	Subpath     string           `json:"subpath,omitempty"`
-	UpdateEvery string           `json:"updateEvery,omitempty"` // Go duration; "" → 1h; "0" → manual only
-	Disabled    bool             `json:"disabled,omitempty"`
-	Rules       []rules.Rule     `json:"rules,omitempty"`
-	Plugins     map[string]*Node `json:"plugins,omitempty"` // marketplace: per plugin (absent = enabled)
-	Skills      map[string]*Node `json:"skills,omitempty"`  // per skill id
+	Type        string       `json:"type"`           // "local" | "git" | "marketplace"
+	Path        string       `json:"path,omitempty"` // local folder (local; marketplace from a folder)
+	URL         string       `json:"url,omitempty"`  // "owner/repo" or a git URL (git, marketplace)
+	Ref         string       `json:"ref,omitempty"`  // branch, tag or 40-hex commit (pinned)
+	Subpath     string       `json:"subpath,omitempty"`
+	UpdateEvery string       `json:"updateEvery,omitempty"` // Go duration; "" → 1h; "0" → manual only
+	Disabled    bool         `json:"disabled,omitempty"`
+	Rules       []rules.Rule `json:"rules,omitempty"`
+	// PluginsDefault is whether marketplace plugins without a Plugins node are on: "" = enabled,
+	// "disabled" = only plugins with a node that is not Disabled are on (see PluginEnabled).
+	PluginsDefault string           `json:"pluginsDefault,omitempty"`
+	Plugins        map[string]*Node `json:"plugins,omitempty"` // marketplace: per plugin entry name
+	Skills         map[string]*Node `json:"skills,omitempty"`  // per skill id
+}
+
+// PluginsDisabled is the PluginsDefault value that turns plugins off unless explicitly enabled.
+const PluginsDisabled = "disabled"
+
+// PluginEnabled reports whether the marketplace plugin entry is on: a Plugins node decides by its
+// Disabled flag (a node present with Disabled=false is explicitly enabled), else PluginsDefault.
+// Disabled plugins are never fetched and deliver no skills.
+func (s *Source) PluginEnabled(entry string) bool {
+	if n := s.Plugins[entry]; n != nil {
+		return !n.Disabled
+	}
+	return s.PluginsDefault != PluginsDisabled
 }
 
 // Node overrides a source's rules for a single plugin or skill.
@@ -264,6 +280,12 @@ func (s *Source) validate(name string) error {
 	}
 	if _, err := s.Interval(); err != nil {
 		return err
+	}
+	switch {
+	case s.PluginsDefault != "" && s.PluginsDefault != PluginsDisabled:
+		return fmt.Errorf("pluginsDefault %q (want %q or empty)", s.PluginsDefault, PluginsDisabled)
+	case s.PluginsDefault != "" && s.Type != "marketplace":
+		return errors.New("pluginsDefault is only for marketplace sources")
 	}
 	for _, r := range s.Rules {
 		if err := r.Validate(); err != nil {

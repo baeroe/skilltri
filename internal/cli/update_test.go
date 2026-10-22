@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/baeroe/skilltri/internal/catalog"
 	"github.com/baeroe/skilltri/internal/daemon"
+	"github.com/baeroe/skilltri/internal/doctor"
 )
 
 func git(t *testing.T, dir string, args ...string) string {
@@ -84,5 +86,59 @@ func TestCLIUpdateOffline(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "\n  ") {
 		t.Error("JSON is not indented")
+	}
+}
+
+// TestUpdateDisabledPlugins: a marketplace with many remote plugins, all disabled by
+// default except one good one; the disabled ones point at a repo that does not exist. update
+// succeeds, and doctor reports no source problems for plugins the user never enabled.
+func TestUpdateDisabledPlugins(t *testing.T) {
+	repo, _ := demoRepo(t)
+	dead := filepath.Join(t.TempDir(), "dead")
+	market := filepath.Join(t.TempDir(), "market")
+	var entries []string
+	for i := range 55 {
+		url := dead
+		if i == 0 {
+			url = repo
+		}
+		entries = append(entries, fmt.Sprintf(`{"name": "p%02d", "source": {"source": "url", "url": "file://%s"}}`, i, url))
+	}
+	if err := os.MkdirAll(filepath.Join(market, ".claude-plugin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mj := `{"name": "big", "plugins": [` + strings.Join(entries, ",") + `]}`
+	if err := os.WriteFile(filepath.Join(market, ".claude-plugin", "marketplace.json"), []byte(mj), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	offline(t, `{"version":1,"sources":{"big":{"type":"marketplace","path":"`+market+`","pluginsDefault":"disabled","plugins":{"p00":{}}}}}`)
+	base := t.TempDir()
+	t.Setenv("HOME", filepath.Join(base, "home"))
+	for _, env := range []string{"SKILLTRI_STATE_DIR", "SKILLTRI_DATA_DIR", "SKILLTRI_CACHE_DIR"} {
+		t.Setenv(env, filepath.Join(base, env))
+	}
+
+	var out bytes.Buffer
+	if code := Update(&out, nil, true); code != 0 {
+		t.Fatalf("exit = %d, output %s", code, out.String())
+	}
+	var r daemon.UpdateReply
+	if err := json.Unmarshal(out.Bytes(), &r); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Sources) != 1 || r.Sources[0].Name != "big/plugins/p00" || r.Sources[0].Error != "" {
+		t.Fatalf("reply = %+v", r)
+	}
+
+	out.Reset()
+	Doctor(&out, true)
+	var fs []doctor.Finding
+	if err := json.Unmarshal(out.Bytes(), &fs); err != nil {
+		t.Fatalf("%v: %s", err, out.String())
+	}
+	for _, f := range fs {
+		if f.Check == "sources" {
+			t.Errorf("doctor: %+v", f)
+		}
 	}
 }

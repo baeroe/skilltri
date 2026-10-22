@@ -63,7 +63,8 @@ type Ref struct {
 	Rules    *[]rules.Rule
 }
 
-// Resolve returns a Ref into cfg. With create, a missing tool, plugin or skill entry is made;
+// Resolve returns a Ref into cfg. With create, a missing tool, plugin or skill entry is made (a new
+// plugin node keeps the plugin's current on/off state, see config.Source.PluginEnabled);
 // a missing server or source is always an error, and a failed Resolve changes nothing.
 func Resolve(cfg *config.Config, t Target, create bool) (Ref, error) {
 	switch t.Kind {
@@ -108,6 +109,9 @@ func Resolve(cfg *config.Config, t Target, create bool) (Ref, error) {
 				*nodes = map[string]*config.Node{}
 			}
 			n = &config.Node{}
+			if t.Kind == "plugin" { // a new node must not change whether the plugin is on
+				n.Disabled = !src.PluginEnabled(name)
+			}
 			(*nodes)[name] = n
 		}
 		return Ref{&n.Disabled, &n.Rules}, nil
