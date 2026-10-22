@@ -63,21 +63,14 @@ func TestFromClaude(t *testing.T) {
 	if len(r.UserSkills) != 1 || filepath.Base(r.UserSkills[0]) != "demo-skill" {
 		t.Errorf("UserSkills = %v", r.UserSkills)
 	}
-	steps := strings.Join(r.Steps, "\n")
-	for _, want := range []string{
-		"claude plugin uninstall on-plugin@alpha",
-		"claude plugin uninstall beta-tool@beta.local",
-		"remove ~/.claude/skills/demo-skill",
-		"skilltri plugin-server list",
-	} {
-		if !strings.Contains(steps, want) {
-			t.Errorf("steps lack %q:\n%s", want, steps)
-		}
+	if got := r.Uninstall["alpha"]; len(got) != 1 || got[0] != "on-plugin@alpha" {
+		t.Errorf("Uninstall[alpha] = %v", got)
 	}
-	for _, not := range []string{"off-plugin", "proj-plugin", "synced"} {
-		if strings.Contains(steps, not) {
-			t.Errorf("steps mention %q:\n%s", not, steps)
-		}
+	if got := r.Uninstall["beta-local"]; len(got) != 1 || got[0] != "beta-tool@beta.local" {
+		t.Errorf("Uninstall[beta-local] = %v", got)
+	}
+	if !strings.Contains(strings.Join(r.Steps, "\n"), "skilltri plugin-server list") {
+		t.Errorf("steps = %v", r.Steps)
 	}
 	if !strings.Contains(strings.Join(r.Warnings, "\n"), "proj-plugin@alpha") {
 		t.Errorf("no warning for the project-scoped plugin: %v", r.Warnings)
@@ -161,10 +154,14 @@ func TestApplyClaude(t *testing.T) {
 		t.Errorf("symlink = %q, %v", target, err)
 	}
 	text := out.String()
-	for _, want := range []string{"imported source beta-local", `skipped source "alpha"`, "copied skill demo-skill", "Next steps", "claude plugin uninstall on-plugin@alpha"} {
+	for _, want := range []string{"imported source beta-local", `skipped source "alpha"`, "copied skill demo-skill", "Next steps",
+		"claude plugin uninstall beta-tool@beta.local", "remove " + filepath.Join(home, ".claude", "skills", "demo-skill")} {
 		if !strings.Contains(text, want) {
 			t.Errorf("output lacks %q:\n%s", want, text)
 		}
+	}
+	if strings.Contains(text, "uninstall on-plugin@alpha") {
+		t.Errorf("skipped source got an uninstall step:\n%s", text)
 	}
 
 	// second run: skill exists → skipped with a warning; --force overwrites
@@ -178,7 +175,7 @@ func TestApplyClaude(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(skillsDir, "demo-skill/SKILL.md")); string(b) != "edited" {
 		t.Error("existing skill overwritten without --force")
 	}
-	if !strings.Contains(out.String(), `skipped skill "demo-skill"`) {
+	if !strings.Contains(out.String(), `skipped skill "demo-skill"`) || strings.Contains(out.String(), "skills/demo-skill") {
 		t.Errorf("output = %s", out.String())
 	}
 	out.Reset()
@@ -191,5 +188,27 @@ func TestApplyClaude(t *testing.T) {
 	cfg, _ = config.Load(cfgPath)
 	if cfg.Sources["alpha"].URL != "demo/alpha-plugins" {
 		t.Errorf("--force did not replace alpha: %+v", cfg.Sources["alpha"])
+	}
+}
+
+func TestApplyClaudeLocalSourceConflict(t *testing.T) {
+	home := fakeHome(t)
+	r, err := FromClaude(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	if err := config.Update(cfgPath, func(c *config.Config) error {
+		c.Sources = map[string]*config.Source{"local": {Type: "local", Path: "/elsewhere"}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := ApplyClaude(cfgPath, filepath.Join(t.TempDir(), "skills"), r, false, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `source "local" does not point at`) {
+		t.Errorf("output = %s", out.String())
 	}
 }

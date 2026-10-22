@@ -20,7 +20,9 @@ import (
 type ClaudeResult struct {
 	Sources    map[string]*config.Source // marketplace sources by (sanitized) name
 	UserSkills []string                  // absolute paths of user skill folders to copy
-	Steps      []string                  // manual follow-ups to print; never executed
+	Steps      []string                  // static manual follow-ups to print; never executed
+	Uninstall  map[string][]string       // source name → "plugin@marketplace" keys Claude Code still has enabled
+	Home       string                    // the Claude home that was read, for the remove steps
 	Warnings   []string
 }
 
@@ -29,7 +31,7 @@ var invalidSourceChars = regexp.MustCompile(`[^A-Za-z0-9-]`)
 // FromClaude reads home/.claude (marketplaces, installed and enabled plugins, user skills).
 // It only reads; missing files simply yield nothing.
 func FromClaude(home string) (ClaudeResult, error) {
-	r := ClaudeResult{Sources: map[string]*config.Source{}}
+	r := ClaudeResult{Sources: map[string]*config.Source{}, Uninstall: map[string][]string{}, Home: home}
 	claude := filepath.Join(home, ".claude")
 
 	var known map[string]struct {
@@ -112,14 +114,12 @@ func FromClaude(home string) (ClaudeResult, error) {
 		r.Sources[name] = src
 		var plugins []string
 		for key, on := range active {
-			if on && strings.HasSuffix(key, "@"+mk) {
+			if i := strings.LastIndex(key, "@"); on && i >= 0 && key[i+1:] == mk {
 				plugins = append(plugins, key)
 			}
 		}
 		sort.Strings(plugins)
-		for _, key := range plugins {
-			r.Steps = append(r.Steps, "claude plugin uninstall "+key)
-		}
+		r.Uninstall[name] = plugins
 	}
 
 	entries, err := os.ReadDir(filepath.Join(claude, "skills"))
@@ -143,7 +143,6 @@ func FromClaude(home string) (ClaudeResult, error) {
 			continue
 		}
 		r.UserSkills = append(r.UserSkills, dir)
-		r.Steps = append(r.Steps, "remove ~/.claude/skills/"+name)
 	}
 	if len(r.Sources) > 0 {
 		r.Steps = append(r.Steps, `run "skilltri update" to fetch the imported marketplaces`)
@@ -191,35 +190,17 @@ func pluginScopes(raw json.RawMessage) map[string]bool {
 // (ensuring a "local" source for it) and prints what happened, the warnings and the manual steps to
 // out. Existing sources and skill folders are skipped unless force is set.
 func ApplyClaude(cfgPath, skillsDir string, r ClaudeResult, force bool, out io.Writer) error {
-	warnings := append([]string(nil), r.Warnings...)
-	var lines []string
+	var warnings, lines []string
 	names := make([]string, 0, len(r.Sources))
 	for n := range r.Sources {
 		names = append(names, n)
 	}
 	sort.Strings(names)
 
-	var copied []string
-	for _, dir := range r.UserSkills {
-		name := filepath.Base(dir)
-		target := filepath.Join(skillsDir, name)
-		if _, err := os.Lstat(target); err == nil {
-			if !force {
-				warnings = append(warnings, fmt.Sprintf("skipped skill %q: already exists (use --force to overwrite)", name))
-				continue
-			}
-			if err := os.RemoveAll(target); err != nil {
-				return err
-			}
-		}
-		if err := copyTree(dir, target); err != nil {
-			return fmt.Errorf("copy skill %s: %w", name, err)
-		}
-		copied = append(copied, name)
-	}
-
+	var steps []string
 	err := config.Update(cfgPath, func(c *config.Config) error {
-		lines = nil
+		lines, steps = nil, nil
+		warnings = append([]string(nil), r.Warnings...)
 		if c.Sources == nil {
 			c.Sources = map[string]*config.Source{}
 		}
@@ -230,15 +211,38 @@ func ApplyClaude(cfgPath, skillsDir string, r ClaudeResult, force bool, out io.W
 			}
 			c.Sources[n] = r.Sources[n]
 			lines = append(lines, "imported source "+n)
+			for _, key := range r.Uninstall[n] {
+				steps = append(steps, "claude plugin uninstall "+key)
+			}
 		}
-		if len(r.UserSkills) > 0 && c.Sources["local"] == nil {
-			c.Sources["local"] = &config.Source{Type: "local", Path: skillsDir}
-			lines = append(lines, "added local source local")
+		if len(r.UserSkills) > 0 {
+			switch l := c.Sources["local"]; {
+			case l == nil:
+				c.Sources["local"] = &config.Source{Type: "local", Path: skillsDir}
+				lines = append(lines, "added local source local")
+			case l.Type != "local" || l.Path != skillsDir:
+				warnings = append(warnings, fmt.Sprintf("source \"local\" does not point at %s: the copied skills are in no source", skillsDir))
+			}
 		}
 		return nil
 	})
 	if err != nil {
 		return err
+	}
+
+	var copied []string
+	for _, dir := range r.UserSkills {
+		name := filepath.Base(dir)
+		target := filepath.Join(skillsDir, name)
+		if _, err := os.Lstat(target); err == nil && !force {
+			warnings = append(warnings, fmt.Sprintf("skipped skill %q: already exists (use --force to overwrite)", name))
+			continue
+		}
+		if err := installTree(dir, target); err != nil {
+			return fmt.Errorf("copy skill %s: %w", name, err)
+		}
+		copied = append(copied, name)
+		steps = append(steps, "remove "+filepath.Join(r.Home, ".claude", "skills", name))
 	}
 
 	for _, l := range lines {
@@ -250,13 +254,34 @@ func ApplyClaude(cfgPath, skillsDir string, r ClaudeResult, force bool, out io.W
 	for _, w := range warnings {
 		fmt.Fprintf(out, "warning: %s\n", w)
 	}
-	if len(r.Steps) > 0 {
+	steps = append(steps, r.Steps...)
+	if len(steps) > 0 {
 		fmt.Fprintln(out, "\nNext steps (not run by skilltri):")
-		for _, s := range r.Steps {
+		for _, s := range steps {
 			fmt.Fprintln(out, "  - "+s)
 		}
 	}
 	return nil
+}
+
+// installTree copies src into a temp folder next to dst and renames it, replacing dst, so a
+// failed copy never leaves a partial skill folder.
+func installTree(src, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.MkdirTemp(filepath.Dir(dst), ".import-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	if err := copyTree(src, tmp); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(dst); err != nil {
+		return err
+	}
+	return os.Rename(tmp, dst)
 }
 
 // copyTree copies src to dst recursively, keeping file modes and copying symlinks as symlinks.
