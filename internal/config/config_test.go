@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/baeroe/skilltri/internal/rules"
 )
@@ -120,7 +121,7 @@ func TestUnknownKeysPreserved(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	in := `{"version":1,"servers":{},"sources":{"a":{"b":[1,2]}}}`
+	in := `{"version":1,"servers":{},"future":{"a":{"b":[1,2]}}}`
 	if err := os.WriteFile(p, []byte(in), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +133,7 @@ func TestUnknownKeysPreserved(t *testing.T) {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(p)
-	if !strings.Contains(string(b), `"sources"`) || !strings.Contains(string(b), `"b"`) {
+	if !strings.Contains(string(b), `"future"`) || !strings.Contains(string(b), `"b"`) {
 		t.Fatalf("unknown key lost: %s", b)
 	}
 	c, _ := Load(p)
@@ -179,5 +180,90 @@ func TestValidServerName(t *testing.T) {
 		if ValidServerName(name) != want {
 			t.Errorf("ValidServerName(%q) != %v", name, want)
 		}
+	}
+}
+
+func TestSourceValidate(t *testing.T) {
+	cases := []struct {
+		name string
+		c    Config
+		ok   bool
+	}{
+		{"local without path", Config{Version: 1, Sources: map[string]*Source{"a": {Type: "local"}}}, false},
+		{"git without url", Config{Version: 1, Sources: map[string]*Source{"a": {Type: "git"}}}, false},
+		{"unknown type", Config{Version: 1, Sources: map[string]*Source{"a": {Type: "zip", Path: "/x"}}}, false},
+		{"bad updateEvery", Config{Version: 1, Sources: map[string]*Source{"a": {Type: "local", Path: "/x", UpdateEvery: "soon"}}}, false},
+		{"bad source name", Config{Version: 1, Sources: map[string]*Source{"a b": {Type: "local", Path: "/x"}}}, false},
+		{"bad node rule", Config{Version: 1, Sources: map[string]*Source{"a": {Type: "local", Path: "/x",
+			Skills: map[string]*Node{"s": {Rules: []rules.Rule{{Path: "/x", Mode: "bogus"}}}}}}}, false},
+		{"reserved server name", Config{Version: 1, Servers: map[string]*Server{"skilltri": {Type: "stdio", Command: "x"}}}, false},
+		{"marketplace with path only", Config{Version: 1, Sources: map[string]*Source{"m": {Type: "marketplace", Path: "/x"}}}, true},
+		{"git ok", Config{Version: 1, Sources: map[string]*Source{"g": {Type: "git", URL: "o/r", UpdateEvery: "30m"}}}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.c.Validate()
+			if (err == nil) != tc.ok {
+				t.Fatalf("ok=%v, err=%v", tc.ok, err)
+			}
+		})
+	}
+}
+
+func TestSourceInterval(t *testing.T) {
+	for in, want := range map[string]time.Duration{"": time.Hour, "0": 0, "30m": 30 * time.Minute} {
+		got, err := (&Source{UpdateEvery: in}).Interval()
+		if err != nil || got != want {
+			t.Errorf("%q: got %v, %v; want %v", in, got, err, want)
+		}
+	}
+}
+
+func TestSourcesRoundTrip(t *testing.T) {
+	p := tmpPath(t)
+	err := Update(p, func(c *Config) error {
+		c.Servers["x"] = &Server{Type: "stdio", Command: "x",
+			Origin: &Origin{Source: "m", Plugin: "p", Server: "x", DefHash: "abc"}}
+		c.Sources = map[string]*Source{"m": {Type: "marketplace", URL: "o/r",
+			Plugins: map[string]*Node{"p": {Disabled: true}},
+			Skills:  map[string]*Node{"p:s": {Rules: []rules.Rule{{Path: "/w", Mode: rules.Tree}}}}}}
+		c.Settings.Adapters = []string{"claude-code", "agents"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := c.Sources["m"]
+	if m == nil || !m.Plugins["p"].Disabled || len(m.Skills["p:s"].Rules) != 1 {
+		t.Fatalf("sources lost: %+v", m)
+	}
+	if o := c.Servers["x"].Origin; o == nil || o.DefHash != "abc" || o.Plugin != "p" {
+		t.Fatalf("origin lost: %+v", o)
+	}
+	if len(c.Settings.Adapters) != 2 {
+		t.Fatalf("adapters lost: %v", c.Settings.Adapters)
+	}
+}
+
+func TestEnabledAdaptersDefault(t *testing.T) {
+	c := &Config{}
+	if got := c.EnabledAdapters(); len(got) != 1 || got[0] != "claude-code" {
+		t.Fatalf("default: %v", got)
+	}
+	c.Settings.Adapters = []string{"agents"}
+	if got := c.EnabledAdapters(); len(got) != 1 || got[0] != "agents" {
+		t.Fatalf("explicit: %v", got)
+	}
+}
+
+func TestConnKeyIgnoresOrigin(t *testing.T) {
+	a := &Server{Type: "stdio", Command: "x"}
+	b := &Server{Type: "stdio", Command: "x", Origin: &Origin{Source: "m", DefHash: "h"}}
+	if a.ConnKey() != b.ConnKey() {
+		t.Fatal("origin must not change the ConnKey")
 	}
 }

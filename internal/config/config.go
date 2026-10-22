@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"time"
 
 	"github.com/baeroe/skilltri/internal/rules"
 )
@@ -22,6 +23,7 @@ type Config struct {
 	Version  int                `json:"version"` // 1
 	Servers  map[string]*Server `json:"servers"`
 	Settings Settings           `json:"settings"`
+	Sources  map[string]*Source `json:"sources,omitempty"`
 
 	// extra keeps unknown top-level keys so newer versions' data survives an Update.
 	extra map[string]json.RawMessage
@@ -29,7 +31,65 @@ type Config struct {
 
 // Settings are global options.
 type Settings struct {
-	IdleTimeoutSec int `json:"idleTimeoutSec,omitempty"` // 0 → 600
+	IdleTimeoutSec int      `json:"idleTimeoutSec,omitempty"` // 0 → 600
+	Adapters       []string `json:"adapters,omitempty"`       // enabled adapter ids; nil → ["claude-code"]
+}
+
+// ReservedName is not allowed as a server name: it is the tool prefix of the skill fallback.
+const ReservedName = "skilltri"
+
+// Source is one place skills come from.
+type Source struct {
+	Type        string           `json:"type"`           // "local" | "git" | "marketplace"
+	Path        string           `json:"path,omitempty"` // local folder (local; marketplace from a folder)
+	URL         string           `json:"url,omitempty"`  // "owner/repo" or a git URL (git, marketplace)
+	Ref         string           `json:"ref,omitempty"`  // branch, tag or 40-hex commit (pinned)
+	Subpath     string           `json:"subpath,omitempty"`
+	UpdateEvery string           `json:"updateEvery,omitempty"` // Go duration; "" → 1h; "0" → manual only
+	Disabled    bool             `json:"disabled,omitempty"`
+	Rules       []rules.Rule     `json:"rules,omitempty"`
+	Plugins     map[string]*Node `json:"plugins,omitempty"` // marketplace: per plugin (absent = enabled)
+	Skills      map[string]*Node `json:"skills,omitempty"`  // per skill id
+}
+
+// Node overrides a source's rules for a single plugin or skill.
+type Node struct {
+	Disabled bool         `json:"disabled,omitempty"`
+	Rules    []rules.Rule `json:"rules,omitempty"`
+}
+
+// Origin records which marketplace plugin server a Server was imported from.
+type Origin struct {
+	Source  string `json:"source"`
+	Plugin  string `json:"plugin"`
+	Server  string `json:"server"`
+	DefHash string `json:"defHash"`
+}
+
+// Interval is the update interval: "" → one hour, "0" → 0 (manual only).
+func (s *Source) Interval() (time.Duration, error) {
+	switch s.UpdateEvery {
+	case "":
+		return time.Hour, nil
+	case "0":
+		return 0, nil
+	}
+	d, err := time.ParseDuration(s.UpdateEvery)
+	if err != nil {
+		return 0, fmt.Errorf("updateEvery: %w", err)
+	}
+	if d < 0 {
+		return 0, errors.New("updateEvery must not be negative")
+	}
+	return d, nil
+}
+
+// EnabledAdapters returns the enabled adapter ids; the default is ["claude-code"].
+func (c *Config) EnabledAdapters() []string {
+	if len(c.Settings.Adapters) == 0 {
+		return []string{"claude-code"}
+	}
+	return c.Settings.Adapters
 }
 
 // Server is one downstream MCP server.
@@ -46,6 +106,7 @@ type Server struct {
 	PerSession       bool              `json:"perSession,omitempty"`
 	Rules            []rules.Rule      `json:"rules,omitempty"`
 	Tools            map[string]*Tool  `json:"tools,omitempty"`
+	Origin           *Origin           `json:"origin,omitempty"` // set when imported from a plugin; not part of ConnKey
 }
 
 // Tool overrides a server's rules for a single tool.
@@ -71,7 +132,7 @@ func (c *Config) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, &all); err != nil {
 		return err
 	}
-	for _, k := range []string{"version", "servers", "settings"} {
+	for _, k := range []string{"version", "servers", "settings", "sources"} {
 		delete(all, k)
 	}
 	*c = Config(p)
@@ -189,12 +250,71 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("server %q: %w", n, err)
 		}
 	}
+	snames := make([]string, 0, len(c.Sources))
+	for n := range c.Sources {
+		snames = append(snames, n)
+	}
+	sort.Strings(snames)
+	for _, n := range snames {
+		if err := c.Sources[n].validate(n); err != nil {
+			return fmt.Errorf("source %q: %w", n, err)
+		}
+	}
+	return nil
+}
+
+func (s *Source) validate(name string) error {
+	if !ValidServerName(name) {
+		return errors.New("invalid source name (use letters, digits and '-', max 32 characters)")
+	}
+	if s == nil {
+		return errors.New("source is empty")
+	}
+	switch s.Type {
+	case "local":
+		if s.Path == "" {
+			return errors.New("local source needs a path")
+		}
+	case "git":
+		if s.URL == "" {
+			return errors.New("git source needs a url")
+		}
+	case "marketplace":
+		if s.URL == "" && s.Path == "" {
+			return errors.New("marketplace source needs a url or a path")
+		}
+	default:
+		return fmt.Errorf("unknown type %q (want local, git or marketplace)", s.Type)
+	}
+	if _, err := s.Interval(); err != nil {
+		return err
+	}
+	for _, r := range s.Rules {
+		if err := r.Validate(); err != nil {
+			return err
+		}
+	}
+	for kind, nodes := range map[string]map[string]*Node{"plugin": s.Plugins, "skill": s.Skills} {
+		for id, n := range nodes {
+			if n == nil {
+				continue
+			}
+			for _, r := range n.Rules {
+				if err := r.Validate(); err != nil {
+					return fmt.Errorf("%s %q: %w", kind, id, err)
+				}
+			}
+		}
+	}
 	return nil
 }
 
 func (s *Server) validate(name string) error {
 	if !ValidServerName(name) {
 		return errors.New("invalid server name (use letters, digits and '-', max 32 characters)")
+	}
+	if name == ReservedName {
+		return fmt.Errorf("server name %q is reserved", ReservedName)
 	}
 	if s == nil {
 		return errors.New("server is empty")
