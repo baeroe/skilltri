@@ -363,6 +363,24 @@ func TestPluginServerEnableAccept(t *testing.T) {
 	if code := PluginServerAccept(&out, "plain"); code != 1 {
 		t.Errorf("no origin = %d, want 1", code)
 	}
+
+	// A disabled source is reported as such, not as gone.
+	SetDisabled(&out, "source/m", true)
+	out.Reset()
+	PluginServerList(&out, true)
+	rows = nil
+	if err := json.Unmarshal(out.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		if r.State != "source disabled" {
+			t.Errorf("row with the source disabled: %+v", r)
+		}
+	}
+	errs.Reset()
+	if code := PluginServerAccept(&out, "writing-notes"); code != 1 || !strings.Contains(errs.String(), "source disabled") {
+		t.Errorf("accept with the source disabled: %d %s", code, errs)
+	}
 }
 
 func TestWhichSkills(t *testing.T) {

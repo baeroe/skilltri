@@ -72,27 +72,41 @@ func DefHash(s config.Server, code string) string {
 }
 
 // ReviewState compares every config server imported from a plugin (Origin set) with the catalog:
-// "ok" if the plugin still defines it unchanged, "needs-review" if the definition changed, "gone"
-// if the catalog no longer has it (plugin or server removed, source disabled or never fetched).
+// "ok" if the plugin still defines it unchanged, "needs-review" if the definition (or the plugin
+// code it runs, see DefHash) changed, "source disabled" if its source is disabled, "not fetched
+// yet" if the plugin or its marketplace has no checkout yet (or its fetch failed), and "gone" if
+// the catalog no longer has it (plugin, server or source removed).
 func ReviewState(cfg *config.Config, c *Catalog) map[string]string {
 	type id struct{ source, plugin, name string }
 	defs := make(map[id]string, len(c.Servers))
 	for _, s := range c.Servers {
 		defs[id{s.Source, s.Plugin, s.Name}] = s.DefHash
 	}
+	noCheckout := map[string]bool{} // state names without a checkout whose fetch failed or is pending
+	for _, st := range c.Sources {
+		if st.Commit == "" && st.Error != "" {
+			noCheckout[st.Name] = true
+		}
+	}
 	out := map[string]string{}
 	for name, s := range cfg.Servers {
 		if s == nil || s.Origin == nil {
 			continue
 		}
-		h, ok := defs[id{s.Origin.Source, s.Origin.Plugin, s.Origin.Server}]
+		o := s.Origin
+		src := cfg.Sources[o.Source]
+		h, ok := defs[id{o.Source, o.Plugin, o.Server}]
 		switch {
-		case !ok:
-			out[name] = "gone"
-		case h == s.Origin.DefHash:
+		case src != nil && src.Disabled:
+			out[name] = "source disabled"
+		case ok && h == o.DefHash:
 			out[name] = "ok"
-		default:
+		case ok:
 			out[name] = "needs-review"
+		case src != nil && ((src.URL != "" && noCheckout[o.Source]) || noCheckout[o.Source+"/plugins/"+o.Plugin]):
+			out[name] = "not fetched yet"
+		default:
+			out[name] = "gone"
 		}
 	}
 	return out

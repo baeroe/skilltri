@@ -452,10 +452,36 @@ func TestReviewState(t *testing.T) {
 		t.Fatalf("review after change = %v, want %v", got, want)
 	}
 
+	// not fetched: a remote plugin without checkout, or a marketplace source without checkout
+	if err := os.RemoveAll(f.builder.Fetcher.Dir("market/plugins/remote-one")); err != nil {
+		t.Fatal(err)
+	}
+	remote := config.Server{Type: "stdio", Command: "demo", Origin: &config.Origin{Source: "market", Plugin: "remote-one", Server: "x", DefHash: "h"}}
+	f.cfg.Servers["remote"] = &remote
+	f.cfg.Sources["unfetched"] = &config.Source{Type: "marketplace", URL: "demo/unfetched"}
+	away := config.Server{Type: "stdio", Command: "demo", Origin: &config.Origin{Source: "unfetched", Plugin: "p", Server: "x", DefHash: "h"}}
+	f.cfg.Servers["away"] = &away
+	c = build(t, f.builder, f.cfg, false)
+	if got := ReviewState(f.cfg, c); got["remote"] != "not fetched yet" || got["away"] != "not fetched yet" {
+		t.Fatalf("review of unfetched = %v", got)
+	}
+	f.cfg.Sources["market"].Disabled = true
+	c = build(t, f.builder, f.cfg, false)
+	if got := ReviewState(f.cfg, c); got["notes"] != "source disabled" || got["remote"] != "source disabled" {
+		t.Fatalf("review with the source disabled = %v", got)
+	}
+	f.cfg.Sources["market"].Disabled = false
+	delete(f.cfg.Servers, "remote")
+	delete(f.cfg.Servers, "away")
+
 	write(t, filepath.Join(f.market, ".claude-plugin", "marketplace.json"), `{"name": "demo-market", "plugins": []}`)
 	c = build(t, f.builder, f.cfg, false)
 	if got, want := ReviewState(f.cfg, c), map[string]string{"notes": "gone", "my-docs": "gone"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("review after removal = %v, want %v", got, want)
+	}
+	delete(f.cfg.Sources, "market")
+	if got := ReviewState(f.cfg, c); got["notes"] != "gone" {
+		t.Fatalf("review with the source removed = %v", got)
 	}
 }
 

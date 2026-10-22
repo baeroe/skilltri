@@ -297,14 +297,24 @@ func TestPluginServersCheck(t *testing.T) {
  "changed":{"type":"stdio","command":"demo","origin":{"source":"mk","plugin":"tool","server":"a","defHash":"old"}},
  "gone":{"type":"stdio","command":"demo","origin":{"source":"mk","plugin":"tool","server":"b","defHash":"x"}},
  "same":{"type":"stdio","command":"demo","origin":{"source":"mk","plugin":"tool","server":"c","defHash":"h"}},
- "plain":{"type":"stdio","command":"demo"}}}`)
+ "off":{"type":"stdio","command":"demo","origin":{"source":"offmk","plugin":"tool","server":"a","defHash":"h"}},
+ "later":{"type":"stdio","command":"demo","origin":{"source":"mk","plugin":"remote","server":"a","defHash":"h"}},
+ "plain":{"type":"stdio","command":"demo"}},
+ "sources":{"mk":{"type":"marketplace","path":"/demo/mk"},"offmk":{"type":"marketplace","path":"/demo/off","disabled":true}}}`)
 	saveCatalog(t, e, &catalog.Catalog{Servers: []catalog.PluginServer{
 		{Source: "mk", Plugin: "tool", Name: "a", DefHash: "new"},
 		{Source: "mk", Plugin: "tool", Name: "c", DefHash: "h"},
-	}})
-	f := expect(t, run(e), "plugin-servers", [2]string{"warning", "changed"}, [2]string{"warning", "gone"})
+	}, Sources: []catalog.SourceState{{Name: "mk"}, {Name: "mk/plugins/remote", Error: "not fetched yet"}}})
+	f := expect(t, run(e), "plugin-servers", [2]string{"warning", "changed"}, [2]string{"warning", "gone"},
+		[2]string{"info", "later"}, [2]string{"info", "off"})
 	if !strings.Contains(f[0].Fix, "skilltri plugin-server accept changed") {
 		t.Errorf("fix = %q", f[0].Fix)
+	}
+	if !strings.Contains(f[2].Message, "not fetched yet") || f[2].Fix != "skilltri update mk" {
+		t.Errorf("not fetched: %+v", f[2])
+	}
+	if !strings.Contains(f[3].Message, "source offmk is disabled") || f[3].Fix != "skilltri enable source/offmk" {
+		t.Errorf("source disabled: %+v", f[3])
 	}
 }
 

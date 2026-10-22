@@ -352,8 +352,11 @@ func (b *Builder) assemble(cfg *config.Config, lock *skilllock.Lock) (*Catalog, 
 					continue // never fetched while disabled: no state, no servers
 				case !enabled:
 					ps.Error = "" // not synced while disabled: an old error is stale
-				case !hasCheckout(co) && ps.Error == "":
-					ps.Error = "not fetched yet"
+				case !hasCheckout(co):
+					ps.Commit = "" // no checkout in use
+					if ps.Error == "" {
+						ps.Error = "not fetched yet"
+					}
 				}
 				c.Sources = append(c.Sources, ps)
 				if !hasCheckout(co) {

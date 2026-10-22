@@ -295,6 +295,16 @@ func checkPluginServers(_ context.Context, s *state) []Finding {
 		case "gone":
 			out = append(out, Finding{Severity: Warning, Check: "plugin-servers", Subject: name,
 				Message: "the plugin no longer defines this server", Fix: "skilltri disable server/" + name + " or delete it from the config"})
+		case "not fetched yet":
+			o := s.cfg.Servers[name].Origin
+			out = append(out, Finding{Severity: Info, Check: "plugin-servers", Subject: name,
+				Message: "plugin " + o.Source + "/" + o.Plugin + " is not fetched yet: the definition cannot be compared",
+				Fix:     "skilltri update " + o.Source})
+		case "source disabled":
+			o := s.cfg.Servers[name].Origin
+			out = append(out, Finding{Severity: Info, Check: "plugin-servers", Subject: name,
+				Message: "source " + o.Source + " is disabled: the definition cannot be compared",
+				Fix:     "skilltri enable source/" + o.Source})
 		}
 	}
 	return out

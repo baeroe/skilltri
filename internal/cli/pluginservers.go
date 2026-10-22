@@ -14,8 +14,9 @@ import (
 	"github.com/baeroe/skilltri/internal/rules"
 )
 
-// PluginServerRow is one line of `plugin-server list`. State is available, enabled, needs-review or
-// gone; Name is the config server it was imported as (empty when available).
+// PluginServerRow is one line of `plugin-server list`. State is available, enabled, needs-review,
+// or (see catalog.ReviewState) gone, source disabled or not fetched yet; Name is the config server
+// it was imported as (empty when available).
 type PluginServerRow struct {
 	Source string `json:"source"`
 	Plugin string `json:"plugin"`
@@ -56,7 +57,7 @@ func PluginServerList(w io.Writer, jsonOut bool) int {
 	}
 	for _, n := range sortedNames(cfg.Servers) {
 		if o := cfg.Servers[n].Origin; o != nil && !seen[psKey{o.Source, o.Plugin, o.Server}] {
-			rows = append(rows, PluginServerRow{Source: o.Source, Plugin: o.Plugin, Server: o.Server, State: "gone", Name: n})
+			rows = append(rows, PluginServerRow{Source: o.Source, Plugin: o.Plugin, Server: o.Server, State: review[n], Name: n})
 		}
 	}
 	if jsonOut {
@@ -162,9 +163,15 @@ func PluginServerAccept(w io.Writer, name string) int {
 		if o == nil {
 			return fmt.Errorf("server %q was not imported from a plugin", name)
 		}
-		ps, ok := findPluginServer(offlineCatalog(c), o.Source, o.Plugin, o.Server)
+		cat := offlineCatalog(c)
+		ps, ok := findPluginServer(cat, o.Source, o.Plugin, o.Server)
 		if !ok {
-			return errors.New("the plugin or its server is gone")
+			switch st := catalog.ReviewState(c, cat)[name]; st {
+			case "gone":
+				return errors.New("the plugin or its server is gone")
+			default:
+				return fmt.Errorf("cannot accept: %s", st)
+			}
 		}
 		d := ps.Def
 		srv.Type, srv.Command, srv.Args, srv.Env, srv.Cwd, srv.URL, srv.Headers = d.Type, d.Command, d.Args, d.Env, d.Cwd, d.URL, d.Headers
