@@ -469,7 +469,7 @@ func TestUpdateAllCancellable(t *testing.T) {
 	}
 	before := runtime.NumGoroutine()
 	out := startBlocked(t, h, "U", started)
-	if v := screen(h); !strings.Contains(v, "updating all sources") || !strings.Contains(v, "esc cancels") {
+	if v := screen(h); !strings.Contains(v, "updating all sources") || !strings.Contains(v, "esc on Skills cancels") {
 		t.Errorf("no busy line:\n%s", v)
 	}
 	h.key("j", "k") // the UI stays responsive

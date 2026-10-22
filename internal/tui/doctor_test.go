@@ -118,7 +118,7 @@ func TestDoctorCancel(t *testing.T) {
 	fd.install(h)
 	h.load()
 	_, run := h.m.Update(keyMsg("5"))
-	if !strings.Contains(screen(h), "running the doctor") || !strings.Contains(screen(h), "running the checks") {
+	if !strings.Contains(screen(h), "running the doctor … (esc on Doctor cancels)") || !strings.Contains(screen(h), "running the checks") {
 		t.Fatalf("no spinner:\n%s", screen(h))
 	}
 	h.key("esc")

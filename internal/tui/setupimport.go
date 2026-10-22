@@ -73,7 +73,7 @@ func (t *setupTab) startImport(m *Model, kind string) tea.Cmd {
 		m.flash("another import is running", true)
 		return nil
 	}
-	m.begin(importWork(kind), "reading "+importTitles[kind]+" …")
+	m.begin(importWork(kind), "reading "+importTitles[kind]+" … (esc on Setup cancels)")
 	t.readSeq++
 	seq, from, home, cfgPath, skillsDir := t.readSeq, importFrom(m, kind), m.opts.Home, m.opts.configPath(), m.opts.skillsDir()
 	return func() tea.Msg {

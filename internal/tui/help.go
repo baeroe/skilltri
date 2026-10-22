@@ -9,7 +9,7 @@ var globalKeys = []string{
 	"↑↓ j k", "move",
 	"R", "reload config, catalog and status",
 	"?", "this help",
-	"esc", "close the dialog",
+	"esc", "close the dialog; on its own tab: cancel an update, doctor run or import read",
 	"q ctrl+c", "quit",
 }
 

@@ -395,14 +395,14 @@ func (t *skillsTab) expand(rows []treeRow, r *treeRow, key string) {
 // startUpdate syncs names (all when nil) in the background; what names them in the status line.
 func (t *skillsTab) startUpdate(m *Model, names []string, what string) tea.Cmd {
 	if t.upd != nil {
-		m.flash("an update is already running (esc cancels it)", true)
+		m.flash("an update is already running (esc on the Skills tab cancels it)", true)
 		return nil
 	}
 	if t.stopping != 0 {
 		m.flash("previous update still stopping, try again in a moment", true)
 		return nil
 	}
-	if !m.begin(updateWork, "updating "+what+" … (esc cancels)") {
+	if !m.begin(updateWork, "updating "+what+" … (esc on Skills cancels)") {
 		return nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())

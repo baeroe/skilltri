@@ -371,7 +371,7 @@ func TestSetupImportCancel(t *testing.T) {
 
 	// cancel while reading: the late preview is dropped
 	_, read := h.m.Update(keyMsg("enter"))
-	if !strings.Contains(screen(h), "reading from 1MCP") {
+	if !strings.Contains(screen(h), "reading from 1MCP … (esc on Setup cancels)") {
 		t.Fatalf("no spinner:\n%s", screen(h))
 	}
 	h.key("esc")

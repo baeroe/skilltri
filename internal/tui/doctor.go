@@ -73,7 +73,7 @@ func (t *doctorTab) run(m *Model) tea.Cmd {
 	t.ran = true
 	t.seq++
 	m.end(doctorWork)
-	m.begin(doctorWork, "running the doctor …")
+	m.begin(doctorWork, "running the doctor … (esc on Doctor cancels)")
 	ctx, cancel := context.WithCancel(context.Background())
 	t.cancel = cancel
 	seq, run, env := t.seq, m.opts.Doctor, m.opts.doctorEnv()

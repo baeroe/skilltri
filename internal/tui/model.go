@@ -22,7 +22,9 @@
 //     back as messages. Action results are reported with Model.flash in the footer's status line.
 //   - Work in flight is shown with Model.begin(key, text): the status line shows a spinner and text
 //     until Model.end(key), which the handler of the result message calls. begin returns false while
-//     key is already pending, so a repeated key press does not start the same work twice. Background
+//     key is already pending, so a repeated key press does not start the same work twice. Work that
+//     esc cancels is cancelled on the tab that started it only (its busy text says which: "esc on
+//     Skills cancels"), since other tabs use esc for their filter or focus. Background
 //     polls the user did not ask for (the which retry) use Model.beginPassive: they show only while
 //     no flash message is shown. The spinner advances on a spinMsg every spinInterval, scheduled
 //     only while something is busy.
