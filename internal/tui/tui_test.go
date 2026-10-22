@@ -588,3 +588,10 @@ func TestModalClosedHook(t *testing.T) {
 		t.Fatalf("quit: a=%d b=%d", a.closedN, b.closedN)
 	}
 }
+
+func TestActionsEnvUsesTUIFolderAndShortTimeout(t *testing.T) {
+	h := newHarness(t, TabServers)
+	if e := h.m.opts.Env; e.Dir != "/work/demo" || e.ControlTimeout != controlTimeout {
+		t.Fatalf("actions env Dir=%q ControlTimeout=%v, want /work/demo and %v", e.Dir, e.ControlTimeout, controlTimeout)
+	}
+}

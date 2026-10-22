@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"slices"
+	"time"
 
 	"github.com/baeroe/skilltri/internal/adapters"
 	"github.com/baeroe/skilltri/internal/catalog"
@@ -55,6 +57,11 @@ type Env struct {
 	CatalogPath string
 	Builder     *catalog.Builder
 	Socket      string
+	// ControlTimeout bounds each daemon control request an action makes (0: 2 s), so an action
+	// never waits long on a daemon that accepts but does not answer.
+	ControlTimeout time.Duration
+	// Dir is the folder unknown-tool checks ask the daemon about ("": the working directory).
+	Dir string
 }
 
 func (e Env) configPath() string {
@@ -69,6 +76,23 @@ func (e Env) catalogPath() string {
 		return e.CatalogPath
 	}
 	return catalog.Path()
+}
+
+// control sends one control request to the daemon, bounded by ControlTimeout.
+func (e Env) control(h daemon.Hello, reply any) error {
+	t := e.ControlTimeout
+	if t <= 0 {
+		t = 2 * time.Second
+	}
+	return daemon.ControlTimeout(e.socket(), h, reply, t)
+}
+
+// dir is the folder for unknown-tool checks: Dir, else the working directory.
+func (e Env) dir() (string, error) {
+	if e.Dir != "" {
+		return e.Dir, nil
+	}
+	return os.Getwd()
 }
 
 func (e Env) socket() string {
@@ -114,7 +138,7 @@ func (e Env) edit(fn func(*config.Config) error) error {
 // daemon watches the config and rebuilds on its own. Any failure to connect counts as no daemon;
 // a daemon that accepted the connection is left to rebuild, even if it did not answer.
 func (e Env) RefreshCatalog() error {
-	if err := daemon.Control(e.socket(), daemon.Hello{Cmd: "status"}, nil); !dialFailed(err) {
+	if err := e.control(daemon.Hello{Cmd: "status"}, nil); !dialFailed(err) {
 		return nil
 	}
 	cfg, err := config.Load(e.configPath())

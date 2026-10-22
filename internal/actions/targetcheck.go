@@ -2,7 +2,6 @@ package actions
 
 import (
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 
@@ -88,15 +87,16 @@ func (e Env) unknownCatalogTarget(t target.Target) string {
 	}
 }
 
-// unknownTool asks the daemon which tools the server offers in the working directory; without a
-// daemon, a server that is not ready or a folder where it is off, it cannot tell.
+// unknownTool asks the daemon which tools the server offers in Env.Dir (default: the working
+// directory); without a daemon, a server that is not ready or a folder where it is off, it cannot
+// tell.
 func (e Env) unknownTool(t target.Target) string {
-	wd, err := os.Getwd()
+	wd, err := e.dir()
 	if err != nil {
 		return ""
 	}
 	var reply daemon.WhichReply
-	if daemon.Control(e.socket(), daemon.Hello{Cmd: "which", Args: []string{rules.Normalize(wd)}}, &reply) != nil {
+	if e.control(daemon.Hello{Cmd: "which", Args: []string{rules.Normalize(wd)}}, &reply) != nil {
 		return ""
 	}
 	for _, s := range reply.Servers {

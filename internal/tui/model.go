@@ -265,6 +265,12 @@ func New(o Options) *Model {
 	if o.Cwd == "" {
 		o.Cwd, _ = os.Getwd()
 	}
+	if o.Env.Dir == "" {
+		o.Env.Dir = o.Cwd // unknown-tool checks of rule edits look at the TUI's folder
+	}
+	if o.Env.ControlTimeout == 0 {
+		o.Env.ControlTimeout = controlTimeout
+	}
 	if o.Control == nil {
 		sock := o.socket()
 		o.Control = func(h daemon.Hello, reply any) error {
