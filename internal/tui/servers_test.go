@@ -51,13 +51,25 @@ func (h *harness) form() *serverForm {
 	return nil
 }
 
+// topForm is the form of the top modal (fails the test when it has none).
+func (h *harness) topForm() *form {
+	h.t.Helper()
+	if n := len(h.m.modals); n > 0 {
+		if f, ok := h.m.modals[n-1].(interface{ formOf() *form }); ok {
+			return f.formOf()
+		}
+	}
+	h.t.Fatalf("no form open:\n%s", screen(h))
+	return nil
+}
+
 // set focuses the form field key, clears it and types value; lines of a multiline field are
 // separated by "\n".
 func (h *harness) set(key, value string) {
 	h.t.Helper()
-	f := h.form()
-	f.form.focusKey(key)
-	fl := f.form.current()
+	f := h.topForm()
+	f.focusKey(key)
+	fl := f.current()
 	if fl.kind == linesField {
 		fl.lines = fl.lines[:1]
 		fl.line = 0

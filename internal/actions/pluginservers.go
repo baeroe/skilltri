@@ -12,8 +12,8 @@ import (
 
 var badNameChars = regexp.MustCompile(`[^A-Za-z0-9-]`)
 
-// defaultServerName is "<plugin>-<server>" with invalid characters replaced by '-', cut to 32 characters.
-func defaultServerName(plugin, server string) string {
+// DefaultServerName is the default name of an enabled plugin server: "<plugin>-<server>" with invalid characters replaced by '-', cut to 32 characters.
+func DefaultServerName(plugin, server string) string {
 	n := strings.TrimLeft(badNameChars.ReplaceAllString(plugin+"-"+server, "-"), "-")
 	if len(n) > 32 {
 		n = n[:32]
@@ -32,7 +32,7 @@ func PluginServerEnable(e Env, ref, name string) (string, error) {
 	}
 	source, plugin, server := p[0], p[1], p[2]
 	if name == "" {
-		name = defaultServerName(plugin, server)
+		name = DefaultServerName(plugin, server)
 	}
 	if !config.ValidServerName(name) || name == config.ReservedName {
 		return "", fmt.Errorf("invalid server name %q (use --name)", name)

@@ -92,18 +92,46 @@ func ControlTimeout(socket string, h Hello, reply any, timeout time.Duration) er
 	return control(socket, h, reply, timeout, timeout)
 }
 
+// ControlContext is Control (with its timeouts) that gives up when ctx is done: the connection is
+// closed and ctx.Err() returned. The daemon is not told; it finishes the request on its own.
+func ControlContext(ctx context.Context, socket string, h Hello, reply any) error {
+	dctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	var d net.Dialer
+	conn, err := d.DialContext(dctx, "unix", socket)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return err
+	}
+	defer conn.Close()
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
+	err = exchange(conn, h, reply, timeoutFor(h.Cmd))
+	if err != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
+}
+
 func control(socket string, h Hello, reply any, dial, total time.Duration) error {
+	conn, err := net.DialTimeout("unix", socket, dial)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	return exchange(conn, h, reply, total)
+}
+
+// exchange sends h on conn and decodes the reply, all within total.
+func exchange(conn net.Conn, h Hello, reply any, total time.Duration) error {
 	if h.V == 0 {
 		h.V = helloVersion
 	}
 	if h.Kind == "" {
 		h.Kind = "control"
 	}
-	conn, err := net.DialTimeout("unix", socket, dial)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(total))
 	b, err := json.Marshal(h)
 	if err != nil {

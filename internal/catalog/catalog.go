@@ -48,13 +48,15 @@ type PluginServer struct {
 }
 
 // PluginInfo is one plugin entry of an enabled marketplace source, also when it is disabled or not
-// fetched. Plugin is the entry name; Name (the plugin.json name) and Extras (what skilltri does not
-// deliver, see marketplace.Plugin.Extras) are known only once its folder was read (Loaded).
+// fetched. Plugin is the entry name; Name (the plugin.json name), Dir (its folder) and Extras (what
+// skilltri does not deliver, see marketplace.Plugin.Extras) are known only once its folder was read
+// (Loaded).
 type PluginInfo struct {
 	Source string   `json:"source"`
 	Plugin string   `json:"plugin"`
 	Name   string   `json:"name,omitempty"`
 	Loaded bool     `json:"loaded,omitempty"`
+	Dir    string   `json:"dir,omitempty"`
 	Extras []string `json:"extras,omitempty"`
 }
 
@@ -383,7 +385,7 @@ func (b *Builder) assemble(cfg *config.Config, lock *skilllock.Lock) (*Catalog, 
 				warn("plugin %s ignored: %v", e.Name, err)
 				continue
 			}
-			c.Plugins[pi].Name, c.Plugins[pi].Loaded, c.Plugins[pi].Extras = p.Name, true, p.Extras
+			c.Plugins[pi].Name, c.Plugins[pi].Loaded, c.Plugins[pi].Dir, c.Plugins[pi].Extras = p.Name, true, p.Dir, p.Extras
 			for _, sn := range sortedKeys(p.Servers) {
 				def := p.Servers[sn]
 				h := DefHash(def, "")

@@ -21,11 +21,16 @@
 //     back as messages. Action results are reported with Model.flash in the footer's status line.
 //   - Work in flight is shown with Model.begin(key, text): the status line shows a spinner and text
 //     until Model.end(key), which the handler of the result message calls. begin returns false while
-//     key is already pending, so a repeated key press does not start the same work twice. The
-//     spinner advances on a spinMsg every spinInterval, scheduled only while something is busy.
+//     key is already pending, so a repeated key press does not start the same work twice. Background
+//     polls the user did not ask for (the which retry) use Model.beginPassive: they show only while
+//     no flash message is shown. The spinner advances on a spinMsg every spinInterval, scheduled
+//     only while something is busy.
+//   - Model.act runs a one-shot action in a command and reports its result (actionMsg) itself: the
+//     Model ends the busy key, flashes the text or error and reloads when asked.
 package tui
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"strconv"
@@ -76,6 +81,10 @@ type Options struct {
 	Now     func() time.Time                      // default time.Now
 	Control func(h daemon.Hello, reply any) error // default daemon.ControlTimeout with 2 s
 	Editor  func(path string) *exec.Cmd           // default $VISUAL/$EDITOR/vi
+	// Update syncs the skill sources names (all enabled ones when empty): through the daemon's
+	// "update" when viaDaemon (falling back to offline when it does not listen), else offline,
+	// saving the catalog. It returns when ctx is done. Default Options.updateSources.
+	Update func(ctx context.Context, names []string, viaDaemon bool) (daemon.UpdateReply, error)
 }
 
 // tabModel is one tab. update gets the keys the Model does not handle globally and every non-key
@@ -136,10 +145,11 @@ type Model struct {
 	statusErr bool
 	statusAt  time.Time
 
-	busyKeys []string          // pending work, oldest first (see begin)
-	busyText map[string]string // its status text
-	spinning bool              // a spinMsg is scheduled
-	spinStep int
+	busyKeys    []string          // pending work, oldest first (see begin)
+	busyText    map[string]string // its status text
+	busyPassive map[string]bool   // keys started with beginPassive
+	spinning    bool              // a spinMsg is scheduled
+	spinStep    int
 
 	quitting bool
 }
@@ -154,15 +164,24 @@ type spinMsg struct{}
 
 // begin marks the work key as running with the status text ("restarting demo …"). It returns
 // false, changing nothing, when key is already running.
-func (m *Model) begin(key, text string) bool {
+func (m *Model) begin(key, text string) bool { return m.startBusy(key, text, false) }
+
+// beginPassive is begin for background work the user did not ask for: its text does not replace a
+// flash message in the status line.
+func (m *Model) beginPassive(key, text string) bool { return m.startBusy(key, text, true) }
+
+func (m *Model) startBusy(key, text string, passive bool) bool {
 	if _, ok := m.busyText[key]; ok {
 		return false
 	}
 	if m.busyText == nil {
-		m.busyText = map[string]string{}
+		m.busyText, m.busyPassive = map[string]string{}, map[string]bool{}
 	}
 	m.busyKeys = append(m.busyKeys, key)
 	m.busyText[key] = text
+	if passive {
+		m.busyPassive[key] = true
+	}
 	return true
 }
 
@@ -172,6 +191,7 @@ func (m *Model) end(key string) {
 		return
 	}
 	delete(m.busyText, key)
+	delete(m.busyPassive, key)
 	for i, k := range m.busyKeys {
 		if k == key {
 			m.busyKeys = append(m.busyKeys[:i], m.busyKeys[i+1:]...)
@@ -183,13 +203,19 @@ func (m *Model) end(key string) {
 // busy reports whether the work key is running.
 func (m *Model) busy(key string) bool { _, ok := m.busyText[key]; return ok }
 
-// busyLine is the spinner and the newest pending work ("" when idle).
-func (m *Model) busyLine() string {
-	n := len(m.busyKeys)
+// busyLine is the spinner and the newest pending work that is passive or not ("" when none).
+func (m *Model) busyLine(passive bool) string {
+	var keys []string
+	for _, k := range m.busyKeys {
+		if m.busyPassive[k] == passive {
+			keys = append(keys, k)
+		}
+	}
+	n := len(keys)
 	if n == 0 {
 		return ""
 	}
-	s := spinFrames[m.spinStep%len(spinFrames)] + " " + m.busyText[m.busyKeys[n-1]]
+	s := spinFrames[m.spinStep%len(spinFrames)] + " " + m.busyText[keys[n-1]]
 	if n > 1 {
 		s += " (+" + itoa(n-1) + ")"
 	}
@@ -228,6 +254,9 @@ func New(o Options) *Model {
 	if o.Editor == nil {
 		o.Editor = defaultEditor
 	}
+	if o.Update == nil {
+		o.Update = o.updateSources
+	}
 	if o.Tab < 0 || o.Tab >= numTabs {
 		o.Tab = TabServers
 	}
@@ -236,6 +265,7 @@ func New(o Options) *Model {
 		m.tabs[t] = &placeholderTab{tab: t}
 	}
 	m.tabs[TabServers] = newServersTab()
+	m.tabs[TabSkills] = newSkillsTab()
 	return m
 }
 
@@ -348,6 +378,8 @@ func (m *Model) update(msg tea.Msg) tea.Cmd {
 		return nil
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+	case actionMsg:
+		return m.actionDone(msg)
 	case tickMsg:
 		if m.statusText() == "" {
 			m.status = ""
@@ -573,7 +605,9 @@ func (m *Model) footer(w int) string {
 	if m.statusErr {
 		st = badStyle
 	}
-	if b := m.busyLine(); b != "" {
+	if b := m.busyLine(false); b != "" {
+		status, st = b, warnStyle
+	} else if b := m.busyLine(true); b != "" && status == "" {
 		status, st = b, warnStyle
 	}
 	if status == "" {

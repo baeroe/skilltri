@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -748,5 +749,68 @@ func TestControlRestart(t *testing.T) {
 	}
 	if err := Control(e.sock, Hello{Cmd: "restart"}, nil); err == nil {
 		t.Fatal("restart without a server succeeded")
+	}
+}
+
+// TestControlContext: a cancelled context stops waiting for a daemon that does not answer; an
+// answer is decoded as with Control.
+func TestControlContext(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "st")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "c.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	answer := make(chan bool, 2)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				if _, err := bufio.NewReader(conn).ReadBytes('\n'); err != nil {
+					return
+				}
+				if <-answer {
+					conn.Write([]byte(`{"result":{"Sources":[{"name":"demo","commit":"abc"}]}}` + "\n"))
+					return
+				}
+				conn.Read(make([]byte, 1)) // wait until the client hangs up
+			}()
+		}
+	}()
+
+	answer <- false
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- ControlContext(ctx, sock, Hello{Cmd: "update"}, nil) }()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ControlContext did not return after cancel")
+	}
+
+	answer <- true
+	var r UpdateReply
+	if err := ControlContext(context.Background(), sock, Hello{Cmd: "update"}, &r); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Sources) != 1 || r.Sources[0].Name != "demo" {
+		t.Fatalf("reply = %+v", r)
+	}
+	if err := ControlContext(context.Background(), filepath.Join(dir, "missing.sock"), Hello{Cmd: "status"}, nil); !errors.Is(err, syscall.ENOENT) {
+		t.Fatalf("missing socket: %v", err)
 	}
 }

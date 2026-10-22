@@ -47,15 +47,6 @@ type whichMsg struct {
 	err   error
 }
 
-// serverActionMsg is the result of an action started from the tab (toggle, remove, restart …).
-type serverActionMsg struct {
-	key    string // busy key (Model.begin) of the action
-	text   string
-	err    error
-	reload bool // the config changed: reload the snapshot
-	status bool // the daemon state changed: refresh the status
-}
-
 func newServersTab() *serversTab {
 	f := newInput("", "filter")
 	f.Prompt = "/"
@@ -131,7 +122,7 @@ func readyKey(st *daemon.StatusReply) string {
 
 // fetchWhich asks the daemon (in a command) which tools the servers offer in the Preview folder.
 func (t *serversTab) fetchWhich(m *Model) tea.Cmd {
-	if m.snap.Status == nil || !m.begin(whichWork, "asking the daemon for tool lists …") {
+	if m.snap.Status == nil || !m.beginPassive(whichWork, "asking the daemon for tool lists …") {
 		return nil
 	}
 	key, ctl, dir := readyKey(m.snap.Status), m.opts.Control, m.opts.Cwd
@@ -214,21 +205,6 @@ func (t *serversTab) update(m *Model, msg tea.Msg) tea.Cmd {
 			return nil
 		}
 		t.which, t.whichErr = msg.reply, nil
-	case serverActionMsg:
-		m.end(msg.key)
-		if msg.err != nil {
-			m.flash(msg.err.Error(), true)
-		} else {
-			m.flash(msg.text, false)
-		}
-		var cmds []tea.Cmd
-		if msg.reload {
-			cmds = append(cmds, m.reload())
-		}
-		if msg.status {
-			cmds = append(cmds, m.refreshStatus())
-		}
-		return tea.Batch(cmds...)
 	case secretStoredMsg:
 		m.end(msg.f.workKey("secret"))
 	case serverSavedMsg:
@@ -272,19 +248,6 @@ func (t *serversTab) filterKey(m *Model, k tea.KeyMsg) tea.Cmd {
 	t.query = t.filter.Value()
 	t.resolve(m)
 	return cmd
-}
-
-// needConfig flashes why the config cannot be changed (false) when it did not load.
-func needConfig(m *Model) bool {
-	if m.snap.Config == nil {
-		msg := "config not loaded yet"
-		if m.snap.ConfigErr != nil {
-			msg = "fix the config first: " + m.snap.ConfigErr.Error()
-		}
-		m.flash(msg, true)
-		return false
-	}
-	return true
 }
 
 func (t *serversTab) listKey(m *Model, key string) tea.Cmd {
@@ -344,12 +307,12 @@ func (t *serversTab) listKey(m *Model, key string) tea.Cmd {
 			dimStyle.Render("Its rules and tool settings go too.")}
 		m.openModal(confirmDanger("Remove server", body, "remove", func(m *Model) tea.Cmd {
 			env := m.opts.Env
-			return t.act(m, "server:"+name, "removing "+name+" …", true, func() (string, error) {
+			return m.act("server:"+name, "removing "+name+" …", true, func() (string, error) {
 				return "removed " + name, actions.ServerRemove(env, name)
 			})
 		}))
 	case " ":
-		return t.setDisabled(m, target.Target{Kind: "server", Server: name}, !s.Disabled, name, "")
+		return toggleCmd(m, target.Target{Kind: "server", Server: name}, !s.Disabled, name, "")
 	case "t", "enter":
 		items := t.toolItems(m, name)
 		if len(items) == 0 {
@@ -371,9 +334,9 @@ func (t *serversTab) listKey(m *Model, key string) tea.Cmd {
 		}
 		return func() tea.Msg {
 			if err := ctl(daemon.Hello{Cmd: "restart", Args: []string{name}}, nil); err != nil {
-				return serverActionMsg{key: key, err: fmt.Errorf("restart %s: %w", name, err)}
+				return actionMsg{key: key, err: fmt.Errorf("restart %s: %w", name, err)}
 			}
-			return serverActionMsg{key: key, text: "restarted " + name, status: true}
+			return actionMsg{key: key, text: "restarted " + name, status: true}
 		}
 	case "A":
 		return t.accept(m, name, s)
@@ -413,21 +376,9 @@ func (t *serversTab) toolKey(m *Model, key string) tea.Cmd {
 				note = ", but rules exclude it in " + dir
 			}
 		}
-		return t.setDisabled(m, target.Target{Kind: "tool", Server: t.sel, Tool: it.name}, disabled, "tool "+it.name+" of "+t.sel, note)
+		return toggleCmd(m, target.Target{Kind: "tool", Server: t.sel, Tool: it.name}, disabled, "tool "+it.name+" of "+t.sel, note)
 	}
 	return nil
-}
-
-// act runs fn in a command as the busy work key (shown as busy in the status line; nil while key
-// is already running) and reports its text or error in the status line.
-func (t *serversTab) act(m *Model, key, busy string, reload bool, fn func() (string, error)) tea.Cmd {
-	if !m.begin(key, busy) {
-		return nil
-	}
-	return func() tea.Msg {
-		text, err := fn()
-		return serverActionMsg{key: key, text: text, err: err, reload: reload && err == nil}
-	}
 }
 
 // rulesExclude reports whether the rules alone (ignoring the server's and the tool's Disabled
@@ -451,26 +402,6 @@ func (t *serversTab) rulesExclude(m *Model, server, tool string) (string, bool) 
 		return "", false
 	}
 	return tildify(oneLine(t.which.Dir), m.opts.Home), true
-}
-
-// setDisabled toggles the node tg in a command; note is appended to the result text.
-func (t *serversTab) setDisabled(m *Model, tg target.Target, disabled bool, what, note string) tea.Cmd {
-	env := m.opts.Env
-	verb := "enabling "
-	if disabled {
-		verb = "disabling "
-	}
-	return t.act(m, tg.String(), verb+what+" …", true, func() (string, error) {
-		warns, err := actions.SetDisabled(env, tg, disabled)
-		text := "enabled " + what + note
-		if disabled {
-			text = "disabled " + what + note
-		}
-		if len(warns) > 0 {
-			text += " (" + strings.Join(warns, "; ") + ")"
-		}
-		return text, err
-	})
 }
 
 // pluginDef is the catalog's current definition of the plugin server s was imported from.
@@ -506,7 +437,7 @@ func (t *serversTab) accept(m *Model, name string, s *config.Server) tea.Cmd {
 	body = append(body, "", dimStyle.Render("Rules, tools and flags stay."))
 	env := m.opts.Env
 	m.openModal(&confirmModal{title: "Accept plugin server", body: body, yes: "accept", color: cYellow, run: func(m *Model) tea.Cmd {
-		return t.act(m, "server:"+name, "accepting "+name+" …", true, func() (string, error) {
+		return m.act("server:"+name, "accepting "+name+" …", true, func() (string, error) {
 			return "accepted the new plugin definition of " + name, actions.PluginServerAccept(env, name)
 		})
 	}})

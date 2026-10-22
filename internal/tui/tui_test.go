@@ -109,42 +109,44 @@ func (h *harness) load() { h.run(h.m.Init()) }
 
 func (h *harness) key(keys ...string) {
 	for _, k := range keys {
-		var msg tea.KeyMsg
-		switch k {
-		case "tab":
-			msg = tea.KeyMsg{Type: tea.KeyTab}
-		case "shift+tab":
-			msg = tea.KeyMsg{Type: tea.KeyShiftTab}
-		case "esc":
-			msg = tea.KeyMsg{Type: tea.KeyEsc}
-		case "enter":
-			msg = tea.KeyMsg{Type: tea.KeyEnter}
-		case "ctrl+c":
-			msg = tea.KeyMsg{Type: tea.KeyCtrlC}
-		case "down":
-			msg = tea.KeyMsg{Type: tea.KeyDown}
-		case "up":
-			msg = tea.KeyMsg{Type: tea.KeyUp}
-		case "left":
-			msg = tea.KeyMsg{Type: tea.KeyLeft}
-		case "right":
-			msg = tea.KeyMsg{Type: tea.KeyRight}
-		case "backspace":
-			msg = tea.KeyMsg{Type: tea.KeyBackspace}
-		case "ctrl+s":
-			msg = tea.KeyMsg{Type: tea.KeyCtrlS}
-		case "ctrl+k":
-			msg = tea.KeyMsg{Type: tea.KeyCtrlK}
-		case "ctrl+u":
-			msg = tea.KeyMsg{Type: tea.KeyCtrlU}
-		case " ":
-			msg = tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}}
-		default:
-			msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
-		}
-		_, cmd := h.m.Update(msg)
+		_, cmd := h.m.Update(keyMsg(k))
 		h.run(cmd)
 	}
+}
+
+// keyMsg is the key message of a key name ("esc", "ctrl+s", " ") or of typed text.
+func keyMsg(k string) tea.KeyMsg {
+	switch k {
+	case "tab":
+		return tea.KeyMsg{Type: tea.KeyTab}
+	case "shift+tab":
+		return tea.KeyMsg{Type: tea.KeyShiftTab}
+	case "esc":
+		return tea.KeyMsg{Type: tea.KeyEsc}
+	case "enter":
+		return tea.KeyMsg{Type: tea.KeyEnter}
+	case "ctrl+c":
+		return tea.KeyMsg{Type: tea.KeyCtrlC}
+	case "down":
+		return tea.KeyMsg{Type: tea.KeyDown}
+	case "up":
+		return tea.KeyMsg{Type: tea.KeyUp}
+	case "left":
+		return tea.KeyMsg{Type: tea.KeyLeft}
+	case "right":
+		return tea.KeyMsg{Type: tea.KeyRight}
+	case "backspace":
+		return tea.KeyMsg{Type: tea.KeyBackspace}
+	case "ctrl+s":
+		return tea.KeyMsg{Type: tea.KeyCtrlS}
+	case "ctrl+k":
+		return tea.KeyMsg{Type: tea.KeyCtrlK}
+	case "ctrl+u":
+		return tea.KeyMsg{Type: tea.KeyCtrlU}
+	case " ":
+		return tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}}
+	}
+	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
 }
 
 // run executes cmd and feeds the resulting messages back (batches included). Ticks are not

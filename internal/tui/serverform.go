@@ -264,6 +264,7 @@ func (sf *serverForm) hints() []string {
 }
 
 func (sf *serverForm) view(m *Model, w, h int) string { return sf.form.view(w, h) }
+func (sf *serverForm) formOf() *form                  { return sf.form }
 
 func (sf *serverForm) update(m *Model, msg tea.Msg) (tea.Cmd, bool) {
 	switch msg := msg.(type) {
