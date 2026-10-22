@@ -1,64 +1,31 @@
 package cli
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"io"
-	"net"
-	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"text/tabwriter"
 	"time"
 
+	"github.com/baeroe/skilltri/internal/actions"
 	"github.com/baeroe/skilltri/internal/catalog"
 	"github.com/baeroe/skilltri/internal/config"
-	"github.com/baeroe/skilltri/internal/daemon"
 	"github.com/baeroe/skilltri/internal/paths"
 )
 
-// editConfig applies fn to the config under the config lock and then refreshes the catalog.
-func editConfig(fn func(*config.Config) error) error {
-	if err := config.Update(paths.ConfigFile(), fn); err != nil {
-		return err
-	}
-	refreshCatalog()
-	return nil
-}
+var actEnv actions.Env
 
-// RefreshCatalog lets other packages refresh the catalog after editing the config.
-func RefreshCatalog() { refreshCatalog() }
-
-// refreshCatalog rebuilds and saves the catalog offline (no git) when no daemon runs; a running
-// daemon watches the config and rebuilds on its own. Any failure to connect counts as no daemon;
-// a daemon that accepted the connection is left to rebuild, even if it did not answer. Failures
-// are reported but not fatal.
-func refreshCatalog() {
-	if err := daemon.Control(paths.SocketPath(), daemon.Hello{Cmd: "status"}, nil); !dialFailed(err) {
-		return
-	}
-	cfg, err := config.Load(paths.ConfigFile())
-	if err != nil {
-		return
-	}
-	if err := catalog.Save(catalog.Path(), offlineCatalog(cfg)); err != nil {
-		fmt.Fprintf(errOut, "skilltri: save catalog: %v\n", err)
+// RefreshCatalog lets other packages refresh the catalog after editing the config. A failure is
+// reported but not fatal.
+func RefreshCatalog() {
+	if err := actEnv.RefreshCatalog(); err != nil {
+		fmt.Fprintf(errOut, "skilltri: %v\n", err)
 	}
 }
 
 // offlineCatalog builds the catalog of cfg from the existing checkouts without running git.
-func offlineCatalog(cfg *config.Config) *catalog.Catalog {
-	c, _ := daemon.DefaultBuilder().Build(context.Background(), cfg, false)
-	return c
-}
-
-// dialFailed reports whether err is a failure to connect to the daemon socket at all.
-func dialFailed(err error) bool {
-	var op *net.OpError
-	return errors.As(err, &op) && op.Op == "dial"
-}
+func offlineCatalog(cfg *config.Config) *catalog.Catalog { return actEnv.OfflineCatalog(cfg) }
 
 func fail(err error) int {
 	fmt.Fprintf(errOut, "skilltri: %v\n", err)
@@ -67,20 +34,7 @@ func fail(err error) int {
 
 // SourceAdd adds the source name. A git or marketplace source is not fetched here.
 func SourceAdd(w io.Writer, name string, src config.Source) int {
-	if !config.ValidServerName(name) {
-		return fail(fmt.Errorf("invalid source name %q (use letters, digits and '-', max 32 characters)", name))
-	}
-	err := editConfig(func(c *config.Config) error {
-		if c.Sources[name] != nil {
-			return fmt.Errorf("source %q already exists", name)
-		}
-		if c.Sources == nil {
-			c.Sources = map[string]*config.Source{}
-		}
-		c.Sources[name] = &src
-		return nil
-	})
-	if err != nil {
+	if err := actions.SourceAdd(actEnv, name, src); err != nil {
 		return fail(err)
 	}
 	fmt.Fprintf(w, "added source %s\n", name)
@@ -92,14 +46,7 @@ func SourceAdd(w io.Writer, name string, src config.Source) int {
 
 // SourceRemove removes the source name from the config (checkouts stay on disk).
 func SourceRemove(w io.Writer, name string) int {
-	err := editConfig(func(c *config.Config) error {
-		if c.Sources[name] == nil {
-			return fmt.Errorf("no such source %q", name)
-		}
-		delete(c.Sources, name)
-		return nil
-	})
-	if err != nil {
+	if err := actions.SourceRemove(actEnv, name); err != nil {
 		return fail(err)
 	}
 	fmt.Fprintf(w, "removed source %s\n", name)
@@ -188,42 +135,14 @@ func sortedNames[V any](m map[string]V) []string {
 	return out
 }
 
-var skillName = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
-
 // SkillNew creates ConfigDir/skills/name/SKILL.md and makes sure the "local" source points at
 // ConfigDir/skills.
 func SkillNew(w io.Writer, name string) int {
-	if len(name) > 64 || !skillName.MatchString(name) {
-		return fail(fmt.Errorf("invalid skill name %q (lowercase letters, digits and '-', max 64 characters)", name))
-	}
-	root := filepath.Join(paths.ConfigDir(), "skills")
-	dir := filepath.Join(root, name)
-	file := filepath.Join(dir, "SKILL.md")
-	if _, err := os.Stat(dir); err == nil {
-		return fail(fmt.Errorf("%s already exists", dir))
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fail(err)
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fail(err)
-	}
-	body := "---\nname: " + name + "\ndescription: TODO\n---\n\n# " + name + "\n\nTODO: describe when and how to use this skill.\n"
-	if err := os.WriteFile(file, []byte(body), 0o644); err != nil {
-		return fail(err)
-	}
-	err := editConfig(func(c *config.Config) error {
-		if c.Sources["local"] == nil {
-			if c.Sources == nil {
-				c.Sources = map[string]*config.Source{}
-			}
-			c.Sources["local"] = &config.Source{Type: "local", Path: root}
-		}
-		return nil
-	})
+	dir, err := actions.SkillNew(actEnv, name)
 	if err != nil {
 		return fail(err)
 	}
-	fmt.Fprintln(w, file)
+	fmt.Fprintln(w, filepath.Join(dir, "SKILL.md"))
 	return 0
 }
 

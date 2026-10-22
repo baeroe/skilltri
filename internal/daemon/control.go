@@ -60,6 +60,20 @@ func WhichSkills(c *catalog.Catalog, cfg *config.Config, dir string) []WhichSkil
 	return out
 }
 
+// WhichOffline decides every server and skill for dir (already normalized) from the config and
+// catalog alone, as `skilltri which` does without a daemon: servers have the state "unknown" and
+// no tools. cat may be nil (no skills).
+func WhichOffline(cfg *config.Config, cat *catalog.Catalog, dir string) WhichReply {
+	reply := WhichReply{Dir: dir}
+	for _, sd := range gateway.Servers(cfg, dir) {
+		reply.Servers = append(reply.Servers, WhichServer{Name: sd.Name, Decision: sd.Decision, State: "unknown"})
+	}
+	if cat != nil {
+		reply.Skills = WhichSkills(cat, cfg, dir)
+	}
+	return reply
+}
+
 // WhichServer is one configured server's decision for the folder.
 type WhichServer struct {
 	Name     string
@@ -92,18 +106,46 @@ func ControlTimeout(socket string, h Hello, reply any, timeout time.Duration) er
 	return control(socket, h, reply, timeout, timeout)
 }
 
+// ControlContext is Control (with its timeouts) that gives up when ctx is done: the connection is
+// closed and ctx.Err() returned. The daemon is not told; it finishes the request on its own.
+func ControlContext(ctx context.Context, socket string, h Hello, reply any) error {
+	dctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	var d net.Dialer
+	conn, err := d.DialContext(dctx, "unix", socket)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return err
+	}
+	defer conn.Close()
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
+	err = exchange(conn, h, reply, timeoutFor(h.Cmd))
+	if err != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
+}
+
 func control(socket string, h Hello, reply any, dial, total time.Duration) error {
+	conn, err := net.DialTimeout("unix", socket, dial)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	return exchange(conn, h, reply, total)
+}
+
+// exchange sends h on conn and decodes the reply, all within total.
+func exchange(conn net.Conn, h Hello, reply any, total time.Duration) error {
 	if h.V == 0 {
 		h.V = helloVersion
 	}
 	if h.Kind == "" {
 		h.Kind = "control"
 	}
-	conn, err := net.DialTimeout("unix", socket, dial)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(total))
 	b, err := json.Marshal(h)
 	if err != nil {
@@ -145,6 +187,8 @@ func (d *Daemon) control(conn net.Conn, h Hello, herr error) {
 			result, err = d.which(h)
 		case "update":
 			result, err = d.update(h.Args)
+		case "restart":
+			err = d.restart(h.Args)
 		case "shutdown":
 			defer d.cancel() // after the reply is written; Run then stops like on SIGTERM
 			d.log.Printf("shutdown requested")
@@ -162,6 +206,20 @@ func (d *Daemon) control(conn net.Conn, h Hello, herr error) {
 	if _, err := conn.Write(append(b, '\n')); err != nil {
 		d.log.Printf("control %s: %v", h.Cmd, err)
 	}
+}
+
+// restart stops every instance of the configured server Args[0]; the next session (or which)
+// starts a fresh process.
+func (d *Daemon) restart(args []string) error {
+	if len(args) != 1 || args[0] == "" {
+		return errors.New("restart needs a server name")
+	}
+	if d.cfg.Load().Servers[args[0]] == nil {
+		return fmt.Errorf("no such server %q", args[0])
+	}
+	d.log.Printf("restart %s requested", args[0])
+	d.mgr.Restart(args[0])
+	return nil
 }
 
 func (d *Daemon) status() StatusReply {

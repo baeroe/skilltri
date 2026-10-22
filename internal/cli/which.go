@@ -8,7 +8,6 @@ import (
 	"github.com/baeroe/skilltri/internal/catalog"
 	"github.com/baeroe/skilltri/internal/config"
 	"github.com/baeroe/skilltri/internal/daemon"
-	"github.com/baeroe/skilltri/internal/gateway"
 	"github.com/baeroe/skilltri/internal/paths"
 	"github.com/baeroe/skilltri/internal/rules"
 )
@@ -38,13 +37,11 @@ func Which(w io.Writer, dir string, jsonOut bool) int {
 			fmt.Fprintf(errOut, "skilltri: which: %v\n", err)
 			return 1
 		}
-		reply = daemon.WhichReply{Dir: dir}
-		for _, sd := range gateway.Servers(cfg, dir) {
-			reply.Servers = append(reply.Servers, daemon.WhichServer{Name: sd.Name, Decision: sd.Decision, State: "unknown"})
+		c, err := catalog.Load(catalog.Path())
+		if err != nil {
+			c = nil
 		}
-		if c, err := catalog.Load(catalog.Path()); err == nil {
-			reply.Skills = daemon.WhichSkills(c, cfg, dir)
-		}
+		reply = daemon.WhichOffline(cfg, c, dir)
 	case err != nil:
 		fmt.Fprintf(errOut, "skilltri: which: %v\n", err)
 		return 1

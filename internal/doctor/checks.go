@@ -19,15 +19,13 @@ import (
 	"github.com/baeroe/skilltri/internal/config"
 	"github.com/baeroe/skilltri/internal/daemon"
 	"github.com/baeroe/skilltri/internal/gateway"
+	"github.com/baeroe/skilltri/internal/harness"
 	"github.com/baeroe/skilltri/internal/rules"
 	"github.com/baeroe/skilltri/internal/skilllock"
 )
 
 // daemonTimeout bounds the status request, dial and reply, so a hung socket cannot stall doctor.
 const daemonTimeout = time.Second
-
-// oneMCPEndpoint is the local 1MCP gateway skilltri replaces.
-const oneMCPEndpoint = "http://127.0.0.1:3050/mcp"
 
 func checkConfig(_ context.Context, s *state) []Finding {
 	err := s.cfgErr
@@ -310,67 +308,54 @@ func checkPluginServers(_ context.Context, s *state) []Finding {
 	return out
 }
 
-// mcpEntry is one server entry in ~/.claude.json.
-type mcpEntry struct {
-	Command string   `json:"command"`
-	Args    []string `json:"args"`
-	URL     string   `json:"url"`
-}
-
-func (m mcpEntry) isSkilltri() bool {
-	return filepath.Base(m.Command) == "skilltri" && len(m.Args) > 0 && m.Args[0] == "mcp"
-}
-
-func (m mcpEntry) is1MCP() bool {
-	if m.URL == oneMCPEndpoint {
-		return true
-	}
-	return slices.ContainsFunc(append([]string{m.Command}, m.Args...), func(a string) bool {
-		return strings.Contains(a, "1mcp") || strings.Contains(a, strings.TrimPrefix(oneMCPEndpoint, "http://"))
-	})
-}
-
+// checkHarness reports Claude Code's MCP entries that still use 1MCP and a missing skilltri
+// registration, with the same rules as the Setup tab (package harness).
 func checkHarness(_ context.Context, s *state) []Finding {
 	path := filepath.Join(s.env.Home, ".claude.json")
-	b, err := os.ReadFile(path)
-	if err != nil {
+	if _, err := os.ReadFile(path); err != nil {
 		return nil // Claude Code not set up (or unreadable): nothing to check
 	}
-	var file struct {
-		MCPServers map[string]mcpEntry `json:"mcpServers"`
-		Projects   map[string]struct {
-			MCPServers map[string]mcpEntry `json:"mcpServers"`
-		} `json:"projects"`
-	}
-	if err := json.Unmarshal(b, &file); err != nil {
+	entries, err := harness.ClaudeEntries(s.env.Home)
+	if err != nil {
 		return []Finding{{Severity: Info, Check: "harness", Subject: ".claude.json", Message: "cannot read Claude Code's MCP servers: " + err.Error()}}
 	}
 	var out []Finding
 	registered := false
-	scan := func(project string, servers map[string]mcpEntry) {
-		for name, m := range servers {
-			registered = registered || m.isSkilltri()
-			if !m.is1MCP() {
-				continue
-			}
-			f := Finding{Severity: Warning, Check: "harness", Subject: name,
-				Message: "1MCP still registered in " + path + ": skilltri replaces it",
-				Fix:     "claude mcp remove --scope user " + name}
-			if project != "" {
-				f.Subject = project + ": " + name
-				f.Fix = "claude mcp remove --scope local " + name + " (run in " + project + ")"
-			}
-			out = append(out, f)
+	for _, e := range entries {
+		registered = registered || e.Skilltri()
+		if !e.OneMCP() {
+			continue
 		}
-	}
-	scan("", file.MCPServers)
-	for p, pr := range file.Projects {
-		scan(p, pr.MCPServers)
+		f := Finding{Severity: Warning, Check: "harness", Subject: e.Name,
+			Message: "1MCP still registered in " + path + ": skilltri replaces it",
+			Fix:     "claude mcp remove --scope user " + e.Name}
+		if e.Project != "" {
+			f.Subject = e.Project + ": " + e.Name
+			f.Fix = "claude mcp remove --scope local " + e.Name + " (run in " + e.Project + ")"
+		}
+		out = append(out, f)
 	}
 	if !registered {
 		out = append(out, Finding{Severity: Info, Check: "harness", Subject: "skilltri",
 			Message: "Claude Code has no MCP server running skilltri mcp",
 			Fix:     "claude mcp add --scope user skilltri -- skilltri mcp"})
+	}
+	return out
+}
+
+// checkHarnessDuplicates reports MCP servers registered directly in a harness config that skilltri
+// serves too (same name, command and arguments, or URL): the harness then gets them twice.
+func checkHarnessDuplicates(_ context.Context, s *state) []Finding {
+	var out []Finding
+	for _, d := range harness.Duplicates(s.env.Home, s.cfg.Servers) {
+		subject, where := d.Harness+": "+d.Entry.Name, d.Entry.File
+		if d.Entry.Project != "" {
+			subject = d.Harness + ": " + d.Entry.Project + ": " + d.Entry.Name
+			where = "the " + d.Entry.Project + " project of " + d.Entry.File
+		}
+		out = append(out, Finding{Severity: Warning, Check: "harness-duplicates", Subject: subject,
+			Message: harness.Names[d.Harness] + " registers " + d.Entry.Name + " itself (" + d.Reason + " as skilltri server " + d.Server + "): it runs twice",
+			Fix:     "remove " + d.Entry.Name + " from " + where + "; skilltri serves it"})
 	}
 	return out
 }

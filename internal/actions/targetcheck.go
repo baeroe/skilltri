@@ -1,49 +1,48 @@
-package cli
+package actions
 
 import (
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 
 	"github.com/baeroe/skilltri/internal/catalog"
 	"github.com/baeroe/skilltri/internal/config"
 	"github.com/baeroe/skilltri/internal/daemon"
-	"github.com/baeroe/skilltri/internal/paths"
 	"github.com/baeroe/skilltri/internal/rules"
 	"github.com/baeroe/skilltri/internal/target"
 )
 
-// warnUnknown prints a warning to errOut when a plugin, skill or tool target names nothing the
-// current catalog (or, for tools, the running daemon) knows, with close matches. Settings for such
-// names are kept: the plugin may not be fetched yet or the server not started. Nothing is printed
-// when the check cannot be made.
-func warnUnknown(t target.Target) {
+// warnUnknown returns a warning when a plugin, skill or tool target names nothing the current
+// catalog (or, for tools, the running daemon) knows, with close matches. Settings for such names
+// are kept: the plugin may not be fetched yet or the server not started. Nothing is returned when
+// the check cannot be made.
+func (e Env) warnUnknown(t target.Target) []string {
 	var msg string
 	switch t.Kind {
 	case "plugin", "skill":
-		msg = unknownCatalogTarget(t)
+		msg = e.unknownCatalogTarget(t)
 	case "tool":
-		msg = unknownTool(t)
+		msg = e.unknownTool(t)
 	}
-	if msg != "" {
-		fmt.Fprintf(errOut, "skilltri: warning: %s\n", msg)
+	if msg == "" {
+		return nil
 	}
+	return []string{msg}
 }
 
-func currentCatalog() *catalog.Catalog {
-	if c, err := catalog.Load(catalog.Path()); err == nil {
+func (e Env) currentCatalog() *catalog.Catalog {
+	if c, err := catalog.Load(e.catalogPath()); err == nil {
 		return c
 	}
-	cfg, err := config.Load(paths.ConfigFile())
+	cfg, err := config.Load(e.configPath())
 	if err != nil {
 		return nil
 	}
-	return offlineCatalog(cfg)
+	return e.OfflineCatalog(cfg)
 }
 
-func unknownCatalogTarget(t target.Target) string {
-	c := currentCatalog()
+func (e Env) unknownCatalogTarget(t target.Target) string {
+	c := e.currentCatalog()
 	if c == nil {
 		return ""
 	}
@@ -88,15 +87,16 @@ func unknownCatalogTarget(t target.Target) string {
 	}
 }
 
-// unknownTool asks the daemon which tools the server offers in the working directory; without a
-// daemon, a server that is not ready or a folder where it is off, it cannot tell.
-func unknownTool(t target.Target) string {
-	wd, err := os.Getwd()
+// unknownTool asks the daemon which tools the server offers in Env.Dir (default: the working
+// directory); without a daemon, a server that is not ready or a folder where it is off, it cannot
+// tell.
+func (e Env) unknownTool(t target.Target) string {
+	wd, err := e.dir()
 	if err != nil {
 		return ""
 	}
 	var reply daemon.WhichReply
-	if daemon.Control(paths.SocketPath(), daemon.Hello{Cmd: "which", Args: []string{rules.Normalize(wd)}}, &reply) != nil {
+	if e.control(daemon.Hello{Cmd: "which", Args: []string{rules.Normalize(wd)}}, &reply) != nil {
 		return ""
 	}
 	for _, s := range reply.Servers {

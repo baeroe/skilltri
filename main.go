@@ -16,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"golang.org/x/term"
 
 	"github.com/baeroe/skilltri/internal/adapters"
@@ -29,6 +30,7 @@ import (
 	"github.com/baeroe/skilltri/internal/secrets"
 	"github.com/baeroe/skilltri/internal/service"
 	"github.com/baeroe/skilltri/internal/shim"
+	"github.com/baeroe/skilltri/internal/tui"
 )
 
 var version = "0.1.0"
@@ -36,7 +38,8 @@ var version = "0.1.0"
 const usage = `skilltri - MCP gateway and agent skill manager
 
 Usage:
-  skilltri                  open the TUI (arrives in a later version)
+  skilltri [--tab NAME]     open the TUI in a terminal
+                            (NAME: servers, skills, preview, setup, doctor)
   skilltri mcp [--cwd DIR]  run the MCP shim on stdio (started by your agent harness)
   skilltri daemon [--wait]  run the gateway daemon in the foreground
                             (--wait: wait for a running daemon to exit, then take over)
@@ -98,10 +101,8 @@ func run(args []string) int {
 		cmd = args[0]
 	}
 	switch cmd {
-	case "":
-		fmt.Print(usage)
-		fmt.Println("\nThe TUI arrives in a later version.")
-		return 0
+	case "", "--tab":
+		return runTUI(args)
 	case "help", "-h", "--help":
 		fmt.Print(usage)
 		return 0
@@ -372,6 +373,43 @@ func runStatus(args []string) int {
 		return 2
 	}
 	return cli.Status(os.Stdout, len(args) == 1)
+}
+
+// runTUI implements `skilltri [--tab NAME]`. Without a terminal on stdout it prints the usage.
+func runTUI(args []string) int {
+	o := tui.Options{}
+	switch {
+	case len(args) == 0:
+	case len(args) == 2 && args[0] == "--tab":
+		t, ok := tui.ParseTab(args[1])
+		if !ok {
+			fmt.Fprintf(os.Stderr, "skilltri: unknown tab %q (servers, skills, preview, setup, doctor)\n", args[1])
+			return 2
+		}
+		o.Tab = t
+	default:
+		fmt.Fprint(os.Stderr, "usage: skilltri [--tab servers|skills|preview|setup|doctor]\n")
+		return 2
+	}
+	if !term.IsTerminal(int(os.Stdout.Fd())) {
+		fmt.Print(usage)
+		return 0
+	}
+	gateway.Version = version // the Doctor tab compares the daemon's version with this binary's
+	var err error
+	if o.Bin, err = os.Executable(); err != nil {
+		fmt.Fprintf(os.Stderr, "skilltri: %v\n", err)
+		return 1
+	}
+	if o.Cwd, err = os.Getwd(); err != nil {
+		fmt.Fprintf(os.Stderr, "skilltri: %v\n", err)
+		return 1
+	}
+	if _, err := tea.NewProgram(tui.New(o), tea.WithAltScreen()).Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "skilltri: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 // runDoctor implements `skilltri doctor [--json]`.

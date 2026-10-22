@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -720,5 +721,96 @@ func TestSkillFallbackFollowsClient(t *testing.T) {
 	time.Sleep(200 * time.Millisecond) // the post-initialize Refresh of native has run by now
 	if has(native) {
 		t.Fatalf("native client lists the skill tools: %v", native.allTools(t))
+	}
+}
+
+// "restart" stops the server's instances; the next session starts a fresh process. Unknown or
+// missing server names are errors.
+func TestControlRestart(t *testing.T) {
+	e := newEnv(t)
+	p, _ := projectDirs(t)
+	e.writeConfig(t, cfgOf(map[string]*config.Server{"a": fake("a", "x")}))
+	e.start(t)
+	c := e.connect(t, Hello{Dir: p})
+	pid := c.pid(t, "a_x")
+	if err := Control(e.sock, Hello{Cmd: "restart", Args: []string{"a"}}, nil); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	eventually(t, 5*time.Second, "restarted server", func() bool {
+		res, err := c.cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "a_x", Arguments: map[string]any{}})
+		if err != nil || res.IsError {
+			return false
+		}
+		var echo fakemcp.Echo
+		return json.Unmarshal([]byte(res.Content[0].(*mcp.TextContent).Text), &echo) == nil && echo.PID != pid
+	})
+	if err := Control(e.sock, Hello{Cmd: "restart", Args: []string{"nope"}}, nil); err == nil || !strings.Contains(err.Error(), "nope") {
+		t.Fatalf("restart of an unknown server: %v", err)
+	}
+	if err := Control(e.sock, Hello{Cmd: "restart"}, nil); err == nil {
+		t.Fatal("restart without a server succeeded")
+	}
+}
+
+// TestControlContext: a cancelled context stops waiting for a daemon that does not answer; an
+// answer is decoded as with Control.
+func TestControlContext(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "st")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "c.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	answer := make(chan bool, 2)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				if _, err := bufio.NewReader(conn).ReadBytes('\n'); err != nil {
+					return
+				}
+				if <-answer {
+					conn.Write([]byte(`{"result":{"Sources":[{"name":"demo","commit":"abc"}]}}` + "\n"))
+					return
+				}
+				conn.Read(make([]byte, 1)) // wait until the client hangs up
+			}()
+		}
+	}()
+
+	answer <- false
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- ControlContext(ctx, sock, Hello{Cmd: "update"}, nil) }()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ControlContext did not return after cancel")
+	}
+
+	answer <- true
+	var r UpdateReply
+	if err := ControlContext(context.Background(), sock, Hello{Cmd: "update"}, &r); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Sources) != 1 || r.Sources[0].Name != "demo" {
+		t.Fatalf("reply = %+v", r)
+	}
+	if err := ControlContext(context.Background(), filepath.Join(dir, "missing.sock"), Hello{Cmd: "status"}, nil); !errors.Is(err, syscall.ENOENT) {
+		t.Fatalf("missing socket: %v", err)
 	}
 }

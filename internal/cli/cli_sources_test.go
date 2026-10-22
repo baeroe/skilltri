@@ -181,6 +181,20 @@ func TestRuleAddRemove(t *testing.T) {
 			t.Errorf("remove %q = %d, want 1", idx, code)
 		}
 	}
+	for idx, want := range map[string]string{
+		"5": `no rule "5" on ` + tgt + ` (it has 2)`,
+		"x": `no rule "x" on ` + tgt + ` (it has 2)`,
+	} {
+		errs.Reset()
+		RuleRemove(&out, tgt, idx)
+		if !strings.Contains(errs.String(), want) {
+			t.Errorf("remove %q message = %q, want %q", idx, errs.String(), want)
+		}
+	}
+	errs.Reset()
+	if code := RuleRemove(&out, "server/none", "x"); code != 1 || !strings.Contains(errs.String(), `no such server "none"`) {
+		t.Errorf("non-numeric on missing target = %d %q", code, errs.String())
+	}
 	if code := RuleRemove(&out, tgt, "1"); code != 0 {
 		t.Fatal("remove 1 failed")
 	}

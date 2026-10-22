@@ -189,8 +189,8 @@ func TestBuildLocalGitMarketplace(t *testing.T) {
 	}
 	wantPlugins := []PluginInfo{
 		{Source: "market", Plugin: "pkg"},
-		{Source: "market", Plugin: "remote-one", Name: "remote-one", Loaded: true},
-		{Source: "market", Plugin: "writing", Name: "writing-tools", Loaded: true},
+		{Source: "market", Plugin: "remote-one", Name: "remote-one", Loaded: true, Dir: f.builder.Fetcher.Dir("market/plugins/remote-one")},
+		{Source: "market", Plugin: "writing", Name: "writing-tools", Loaded: true, Dir: filepath.Join(f.market, "plugins", "writing")},
 	}
 	if !reflect.DeepEqual(c.Plugins, wantPlugins) {
 		t.Fatalf("plugins = %+v, want %+v", c.Plugins, wantPlugins)

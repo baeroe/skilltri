@@ -147,6 +147,31 @@ func unitPath(home string) string {
 
 func domain() string { return "gui/" + strconv.Itoa(uid()) }
 
+// File is the service file of this OS: the launchd plist on macOS, the systemd unit on Linux.
+func File() (string, error) {
+	home, err := homeDir()
+	if err != nil {
+		return "", err
+	}
+	switch goos {
+	case "darwin":
+		return plistPath(home), nil
+	case "linux":
+		return unitPath(home), nil
+	}
+	return "", fmt.Errorf("daemon service: unsupported OS %s", goos)
+}
+
+// Installed reports whether the service file exists (it does not ask launchd or systemd).
+func Installed() bool {
+	f, err := File()
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(f)
+	return err == nil
+}
+
 // Install writes the service file for exe and starts the service. It replaces an installed one.
 func Install(exe string) error {
 	home, err := homeDir()
