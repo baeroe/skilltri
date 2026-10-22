@@ -126,10 +126,11 @@ func sortedSources(cfg *config.Config) []string {
 
 // treeRow is one shown row of the tree.
 type treeRow struct {
-	node  *treeNode
-	depth int
-	open  bool // expanded (only meaningful with children)
-	match bool // the node itself matches the filter
+	node   *treeNode
+	depth  int
+	open   bool // expanded (only meaningful with children)
+	match  bool // the node itself matches the filter
+	forced bool // shown open by the filter (an ancestor of a match): expand keys do not apply
 }
 
 // matches reports whether the node itself matches the lowercased query q: skills by ID and
@@ -182,7 +183,7 @@ func flattenTree(roots []*treeNode, open map[string]bool, query string) []treeRo
 		case n.matches(q):
 			all(n, depth, true)
 		case n.hasMatch(q):
-			out = append(out, treeRow{node: n, depth: depth, open: true})
+			out = append(out, treeRow{node: n, depth: depth, open: true, forced: true})
 			for _, c := range n.children {
 				filtered(c, depth+1)
 			}

@@ -191,6 +191,25 @@ func TestFilterExpands(t *testing.T) {
 	}
 }
 
+func TestFilterIgnoresExpandOnForcedAncestors(t *testing.T) {
+	h := newHarness(t, TabSkills)
+	demoSkills(h)
+	h.load()
+	h.key("/", "alpha", "enter")
+	h.selectNode(srcKey("demo-local")) // shown open because a child matches
+	h.key("enter", "left", "h")
+	if _, set := h.skills().open[srcKey("demo-local")]; set {
+		t.Errorf("expand keys changed the hidden state of a forced-open ancestor: %v", h.skills().open)
+	}
+	if h.skills().sel != srcKey("demo-local") {
+		t.Errorf("selection moved to %q", h.skills().sel)
+	}
+	h.key("esc")
+	if v := screen(h); !strings.Contains(v, "▾ demo-local") || !strings.Contains(v, "demo-beta") {
+		t.Errorf("demo-local collapsed after clearing the filter:\n%s", v)
+	}
+}
+
 // choose selects value in the choice field key of the top form.
 func (h *harness) choose(key, value string) {
 	h.t.Helper()
