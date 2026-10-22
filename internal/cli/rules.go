@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 
+	"github.com/baeroe/skilltri/internal/actions"
 	"github.com/baeroe/skilltri/internal/config"
 	"github.com/baeroe/skilltri/internal/paths"
 	"github.com/baeroe/skilltri/internal/rules"
@@ -14,6 +15,13 @@ import (
 
 func sortStrings(s []string) { sort.Strings(s) }
 
+// warn prints the warnings of an action to errOut.
+func warn(ws []string) {
+	for _, w := range ws {
+		fmt.Fprintf(errOut, "skilltri: warning: %s\n", w)
+	}
+}
+
 // RuleAdd appends a rule (mode, path as given) to the node named by tgt.
 func RuleAdd(w io.Writer, tgt, mode, path string) int {
 	t, err := target.Parse(tgt)
@@ -21,23 +29,12 @@ func RuleAdd(w io.Writer, tgt, mode, path string) int {
 		fmt.Fprintf(errOut, "skilltri: %v\n", err)
 		return 2
 	}
-	r := rules.Rule{Path: path, Mode: rules.Mode(mode)}
-	if err := r.Validate(); err != nil {
-		return fail(err)
-	}
-	err = editConfig(func(c *config.Config) error {
-		ref, err := target.Resolve(c, t, true)
-		if err != nil {
-			return err
-		}
-		*ref.Rules = append(*ref.Rules, r)
-		return nil
-	})
+	ws, err := actions.RuleAdd(actEnv, t, rules.Rule{Path: path, Mode: rules.Mode(mode)})
 	if err != nil {
 		return fail(err)
 	}
 	fmt.Fprintf(w, "added rule %s %s to %s\n", mode, path, t)
-	warnUnknown(t)
+	warn(ws)
 	return 0
 }
 
@@ -48,22 +45,13 @@ func RuleRemove(w io.Writer, tgt, index string) int {
 		fmt.Fprintf(errOut, "skilltri: %v\n", err)
 		return 2
 	}
-	err = editConfig(func(c *config.Config) error {
-		ref, err := target.Resolve(c, t, false)
-		if err != nil {
-			return err
-		}
-		if index == "all" {
-			*ref.Rules = nil
-			return nil
-		}
-		n, err := strconv.Atoi(index)
-		if err != nil || n < 1 || n > len(*ref.Rules) {
-			return fmt.Errorf("no rule %q on %s (it has %d)", index, t, len(*ref.Rules))
-		}
-		*ref.Rules = append((*ref.Rules)[:n-1:n-1], (*ref.Rules)[n:]...)
-		return nil
-	})
+	if index == "all" {
+		err = actions.RuleClear(actEnv, t)
+	} else if n, convErr := strconv.Atoi(index); convErr != nil {
+		err = fmt.Errorf("no rule %q on %s", index, t)
+	} else {
+		err = actions.RuleRemove(actEnv, t, n)
+	}
 	if err != nil {
 		return fail(err)
 	}
@@ -152,14 +140,7 @@ func SetDisabled(w io.Writer, tgt string, disabled bool) int {
 		fmt.Fprintf(errOut, "skilltri: %v\n", err)
 		return 2
 	}
-	err = editConfig(func(c *config.Config) error {
-		ref, err := target.Resolve(c, t, true)
-		if err != nil {
-			return err
-		}
-		*ref.Disabled = disabled
-		return nil
-	})
+	ws, err := actions.SetDisabled(actEnv, t, disabled)
 	if err != nil {
 		return fail(err)
 	}
@@ -168,6 +149,6 @@ func SetDisabled(w io.Writer, tgt string, disabled bool) int {
 		verb = "disabled"
 	}
 	fmt.Fprintf(w, "%s %s\n", verb, t)
-	warnUnknown(t)
+	warn(ws)
 	return 0
 }

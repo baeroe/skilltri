@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"slices"
 	"text/tabwriter"
 
+	"github.com/baeroe/skilltri/internal/actions"
 	"github.com/baeroe/skilltri/internal/adapters"
 	"github.com/baeroe/skilltri/internal/config"
 	"github.com/baeroe/skilltri/internal/paths"
@@ -60,37 +62,14 @@ func yesNo(b bool, yes, no string) string {
 // AdapterSet enables or disables the adapter id in settings.adapters. An unknown id exits 2; the
 // last enabled adapter cannot be disabled (an empty list would mean the default again).
 func AdapterSet(w io.Writer, id string, enable bool) int {
-	if _, ok := adapters.ByID(id); !ok {
-		fmt.Fprintf(errOut, "skilltri: unknown adapter %q\n", id)
+	err := actions.SetAdapter(actEnv, id, enable)
+	if errors.Is(err, actions.ErrInvalid) {
+		fmt.Fprintf(errOut, "skilltri: %v\n", err)
 		return 2
 	}
-	err := editConfig(func(c *config.Config) error {
-		list := slices.Clone(c.EnabledAdapters())
-		switch has := slices.Contains(list, id); {
-		case enable && !has:
-			list = append(list, id)
-		case !enable && has:
-			list = slices.DeleteFunc(list, func(s string) bool { return s == id })
-		}
-		if len(list) == 0 {
-			return fmt.Errorf("cannot disable %s: at least one adapter must stay enabled", id)
-		}
-		slices.SortStableFunc(list, func(a, b string) int { return registryIndex(a) - registryIndex(b) })
-		c.Settings.Adapters = list
-		return nil
-	})
 	if err != nil {
 		return fail(err)
 	}
 	fmt.Fprintf(w, "%s %s\n", yesNo(enable, "enabled", "disabled"), id)
 	return 0
-}
-
-func registryIndex(id string) int {
-	for i, a := range adapters.Registry {
-		if a.ID == id {
-			return i
-		}
-	}
-	return len(adapters.Registry)
 }
