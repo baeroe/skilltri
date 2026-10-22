@@ -321,3 +321,36 @@ func TestCommandEnv(t *testing.T) {
 		t.Errorf("user GIT_SSH_COMMAND overridden: %v", env)
 	}
 }
+
+func TestSyncMovedTag(t *testing.T) {
+	r := newRepo(t)
+	f := newFetcher(t)
+	mustSync(t, f, "demo", r.url(), "") // the clone fetches tag v1
+	moved := r.commit("a.txt", "B")
+	run(t, r.dir, "tag", "-f", "v1") // upstream moves v1
+	if co := mustSync(t, f, "demo", r.url(), "v1"); co.Commit != moved {
+		t.Fatalf("commit = %s, want the moved tag %s", co.Commit, moved)
+	}
+}
+
+func TestSyncBrokenCheckoutRecloned(t *testing.T) {
+	r := newRepo(t)
+	outer := newRepo(t) // Root inside another work tree: git must never fall back to it
+	f := &Fetcher{Root: filepath.Join(outer.dir, "sources")}
+	mustSync(t, f, "demo", r.url(), "")
+	dir := f.Dir("demo")
+	// a .git without a valid HEAD: rev-parse HEAD fails
+	if err := os.RemoveAll(filepath.Join(dir, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if co, ok := f.Current("demo"); ok {
+		t.Fatalf("broken checkout reported as %+v (the outer repo?)", co)
+	}
+	co := mustSync(t, f, "demo", r.url(), "")
+	if co.Commit != r.head() || readFile(t, filepath.Join(dir, "a.txt")) != "A" {
+		t.Fatalf("checkout = %+v", co)
+	}
+}

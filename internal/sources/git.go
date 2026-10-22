@@ -95,6 +95,11 @@ func (f *Fetcher) Sync(ctx context.Context, key, url, ref string) (Checkout, err
 		}
 	} else if err != nil {
 		return Checkout{}, err
+	} else if _, err := f.git(ctx, dir, "rev-parse", "--verify", "HEAD"); err != nil {
+		// a broken checkout (corrupt or empty .git) never heals by fetching: clone it afresh
+		if err := f.clone(ctx, dir, url, ref); err != nil {
+			return Checkout{}, err
+		}
 	} else if err := f.update(ctx, dir, url, ref); err != nil {
 		return Checkout{}, err
 	}
@@ -106,7 +111,8 @@ func (f *Fetcher) Sync(ctx context.Context, key, url, ref string) (Checkout, err
 }
 
 // clone clones url into a temp dir next to dir, checks out ref there and renames it into place,
-// so a failed first clone leaves nothing behind.
+// so a failed clone leaves nothing behind. An existing dir (a broken checkout) is replaced only
+// after the new clone succeeded.
 func (f *Fetcher) clone(ctx context.Context, dir, url, ref string) error {
 	parent := filepath.Dir(dir)
 	tmp, err := os.MkdirTemp(parent, ".clone-*")
@@ -120,6 +126,16 @@ func (f *Fetcher) clone(ctx context.Context, dir, url, ref string) error {
 	if err := f.checkout(ctx, tmp, ref); err != nil {
 		return err
 	}
+	if _, err := os.Lstat(dir); err == nil {
+		old, err := os.MkdirTemp(parent, ".broken-*")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(old)
+		if err := os.Rename(dir, filepath.Join(old, "repo")); err != nil {
+			return err
+		}
+	}
 	return os.Rename(tmp, dir)
 }
 
@@ -131,7 +147,8 @@ func (f *Fetcher) update(ctx context.Context, dir, url, ref string) error {
 		}
 	}
 	if !Pinned(ref) || !f.hasCommit(ctx, dir, ref) {
-		if _, err := f.git(ctx, dir, "fetch", "--prune", "--tags", "origin"); err != nil {
+		// --force: a tag moved upstream replaces the local one instead of failing every update
+		if _, err := f.git(ctx, dir, "fetch", "--prune", "--tags", "--force", "origin"); err != nil {
 			return err
 		}
 	}
@@ -235,6 +252,11 @@ func (f *Fetcher) git(ctx context.Context, dir string, args ...string) (string, 
 	}
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Env = commandEnv()
+	if f.Root != "" { // a broken checkout must never make git use a repo above Root
+		if root, err := filepath.Abs(f.Root); err == nil {
+			cmd.Env = append(cmd.Env, "GIT_CEILING_DIRECTORIES="+root)
+		}
+	}
 	cmd.WaitDelay = 5 * time.Second // grandchildren (ssh, helpers) holding the pipes cannot outlive the timeout
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
