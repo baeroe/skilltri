@@ -27,14 +27,16 @@ func SourceAdd(e Env, name string, s config.Source) error {
 	})
 }
 
-// SourceUpdate replaces the settings of the source name with s but keeps Rules, Plugins and Skills
-// of the existing entry when s has them nil. A missing source wraps ErrNotFound.
+// SourceUpdate replaces the settings of the source name with s but keeps Disabled (SetDisabled
+// changes it) and, when s has them nil, Rules, Plugins and Skills of the existing entry. A missing
+// source wraps ErrNotFound.
 func SourceUpdate(e Env, name string, s config.Source) error {
 	return e.edit(func(c *config.Config) error {
 		old := c.Sources[name]
 		if old == nil {
 			return wrap(ErrNotFound, "no such source %q", name)
 		}
+		s.Disabled = old.Disabled
 		if s.Rules == nil {
 			s.Rules = old.Rules
 		}

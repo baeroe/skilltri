@@ -207,6 +207,12 @@ func TestSourceActions(t *testing.T) {
 	if s.Type != "git" || s.Path != "" || s.Ref != "main" || len(s.Rules) != 1 {
 		t.Errorf("update = %+v", s)
 	}
+	if _, err := SetDisabled(e, parse(t, "source/mine"), true); err != nil {
+		t.Fatal(err)
+	}
+	if err := SourceUpdate(e, "mine", config.Source{Type: "git", URL: "https://example.com/demo/skills.git", Disabled: false}); err != nil || !load(t, e).Sources["mine"].Disabled {
+		t.Errorf("update changed disabled: %v", err)
+	}
 	if err := SourceUpdate(e, "nope", config.Source{Type: "local", Path: local}); !errors.Is(err, ErrNotFound) {
 		t.Errorf("update missing = %v", err)
 	}

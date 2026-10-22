@@ -308,6 +308,17 @@ func TestAddSourceForm(t *testing.T) {
 	if s := h.config().Sources["demo-git"]; s == nil || s.Ref != "main" || !s.Disabled || s.UpdateEvery != "30m" {
 		t.Fatalf("edited git: %+v", s)
 	}
+
+	// enabled elsewhere while the form is open (no reload yet): saving keeps it enabled
+	h.key("e")
+	cfg = h.config()
+	cfg.Sources["demo-git"].Disabled = false
+	h.writeConfig(cfg)
+	h.set("ref", "v2")
+	h.key("ctrl+s")
+	if s := h.config().Sources["demo-git"]; s == nil || s.Ref != "v2" || s.Disabled {
+		t.Fatalf("save re-disabled the source: %+v", s)
+	}
 }
 
 func TestNewSkillOpensEditor(t *testing.T) {

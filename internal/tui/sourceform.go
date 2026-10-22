@@ -202,11 +202,6 @@ func (sf *sourceForm) save(m *Model) tea.Cmd {
 		return nil
 	}
 	env, orig := m.opts.Env, sf.orig
-	if orig != "" && m.snap.Config != nil {
-		if old := m.snap.Config.Sources[orig]; old != nil {
-			s.Disabled = old.Disabled // SourceUpdate keeps rules and nodes, not the flag
-		}
-	}
 	if !m.begin(sf.workKey(), "saving source "+name+" …") {
 		return nil
 	}
