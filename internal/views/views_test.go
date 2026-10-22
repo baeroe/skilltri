@@ -212,3 +212,44 @@ func TestGC(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestClaudeViewRebuildsAfterGCRace(t *testing.T) {
+	cache := t.TempDir()
+	active := demoEntries(t)
+	calls := 0
+	beforeTouch = func(view string) { // GC removes the view between the existence check and the touch
+		calls++
+		if calls == 1 {
+			os.RemoveAll(view)
+		}
+	}
+	t.Cleanup(func() { beforeTouch = nil })
+	dirs, err := Claude(cache, active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("touch attempts = %d, want 2", calls)
+	}
+	if _, err := os.Stat(filepath.Join(dirs[0], ".claude-plugin", "plugin.json")); err != nil {
+		t.Fatalf("view not rebuilt: %v", err)
+	}
+}
+
+func TestClaudeViewRelativeSkillDir(t *testing.T) {
+	cache := t.TempDir()
+	src := t.TempDir()
+	skillDir(t, src, "alpha")
+	t.Chdir(src)
+	dirs, err := Claude(cache, []catalog.Entry{entry("alpha", "demo-local", "", "alpha")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.Readlink(filepath.Join(dirs[0], "skills", "alpha"))
+	if err != nil || !filepath.IsAbs(got) {
+		t.Fatalf("link target = %q, %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(dirs[0], "skills", "alpha", "SKILL.md")); err != nil {
+		t.Fatalf("link does not resolve: %v", err)
+	}
+}

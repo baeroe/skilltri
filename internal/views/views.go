@@ -37,15 +37,25 @@ func Claude(cacheDir string, active []catalog.Entry) ([]string, error) {
 	}
 	root := filepath.Join(cacheDir, "views")
 	view := filepath.Join(root, hash(active))
-	if _, err := os.Stat(view); errors.Is(err, os.ErrNotExist) {
-		if err := build(root, view, plugins); err != nil {
+	for attempt := 0; ; attempt++ {
+		if _, err := os.Stat(view); errors.Is(err, os.ErrNotExist) {
+			if err := build(root, view, plugins); err != nil {
+				return nil, err
+			}
+		} else if err != nil {
 			return nil, err
 		}
-	} else if err != nil {
-		return nil, err
-	}
-	if err := touch(filepath.Join(view, usedFile)); err != nil {
-		return nil, err
+		if beforeTouch != nil {
+			beforeTouch(view)
+		}
+		err := touch(filepath.Join(view, usedFile))
+		if err == nil {
+			break
+		}
+		if attempt > 0 || !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		// GC removed the view after the existence check: rebuild once
 	}
 	names := make([]string, 0, len(plugins))
 	for name := range plugins {
@@ -98,7 +108,7 @@ func GC(cacheDir string, maxAge time.Duration) error {
 // group maps each Claude plugin name to its skills (link name → skill dir). The plugin of a
 // marketplace skill is the part of its ID before ":" (the plugin.json name), local and git skills
 // go into LocalPlugin. Names that are not a single path element are skipped; on a duplicate link
-// name the first entry wins.
+// name the first entry wins. Skill dirs are made absolute (symlink targets).
 func group(active []catalog.Entry) map[string]map[string]string {
 	plugins := map[string]map[string]string{}
 	for _, e := range active {
@@ -113,11 +123,15 @@ func group(active []catalog.Entry) map[string]map[string]string {
 		if !SafeName(plugin) || !SafeName(name) || e.Skill.Dir == "" {
 			continue
 		}
+		dir, err := filepath.Abs(e.Skill.Dir)
+		if err != nil {
+			continue
+		}
 		if plugins[plugin] == nil {
 			plugins[plugin] = map[string]string{}
 		}
 		if _, ok := plugins[plugin][name]; !ok {
-			plugins[plugin][name] = e.Skill.Dir
+			plugins[plugin][name] = dir
 		}
 	}
 	return plugins
@@ -129,11 +143,15 @@ func SafeName(name string) bool {
 	return name != "" && name != "." && name != ".." && !strings.ContainsAny(name, "/\\\x00")
 }
 
-// hash is the first 16 hex chars of the sha256 of the sorted "id\tdir" lines of active.
+// hash is the first 16 hex chars of the sha256 of the sorted "id\tdir" lines of active (absolute dirs).
 func hash(active []catalog.Entry) string {
 	lines := make([]string, len(active))
 	for i, e := range active {
-		lines[i] = e.ID + "\t" + e.Skill.Dir + "\n"
+		dir := e.Skill.Dir
+		if abs, err := filepath.Abs(dir); err == nil && dir != "" {
+			dir = abs
+		}
+		lines[i] = e.ID + "\t" + dir + "\n"
 	}
 	sort.Strings(lines)
 	sum := sha256.Sum256([]byte(strings.Join(lines, "")))
@@ -199,3 +217,6 @@ func touch(path string) error {
 	}
 	return os.Chtimes(path, now, now)
 }
+
+// beforeTouch is a test hook called with the view dir before .used is touched.
+var beforeTouch func(view string)

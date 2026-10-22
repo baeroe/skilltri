@@ -23,13 +23,16 @@ const manifestFile = ".skilltri.json"
 // excludeMarker heads the lines skilltri appends to .git/info/exclude.
 const excludeMarker = "# skilltri"
 
+// manifest maps each owned link name to the target skilltri created it with. The legacy format, a
+// plain list of names, is still read (names with an empty target).
 type manifest struct {
-	Links []string `json:"links"`
+	Links map[string]string `json:"links"`
 }
 
 // SyncResult reports a SyncProjectDir run: Linked are the owned links in place afterwards, Removed
-// the owned links removed by this run, Skipped the link names left out because a user entry of the
-// same name exists. All sorted.
+// the owned links removed by this run, Skipped the names left alone because a user entry of that
+// name exists (including a manifest-listed link that no longer points where skilltri pointed it).
+// All sorted.
 type SyncResult struct {
 	Linked, Removed []string
 	Skipped         []string // user entries we left alone
@@ -37,9 +40,10 @@ type SyncResult struct {
 
 // SyncProjectDir makes sessionDir/rel hold one symlink per active skill (named after the skill, or
 // <plugin>-<name> when two active skills share a name) and nothing else of skilltri's. Links it
-// owns are listed in rel/.skilltri.json; owned links that are no longer active are removed, every
+// owns are recorded with their target in rel/.skilltri.json; an entry counts as owned only while it
+// is a symlink to the recorded target. Owned links that are no longer active are removed, every
 // other entry is never touched. rel is created only when there is at least one link. Inside a git
-// work tree the manifest and link paths are appended once to the repo's info/exclude. Errors (for
+// work tree the manifest and link paths are added once to the repo's info/exclude. Errors (for
 // example a read-only folder) are returned for the caller to log; the sync never panics.
 func SyncProjectDir(sessionDir, rel string, active []catalog.Entry) (SyncResult, error) {
 	var res SyncResult
@@ -55,22 +59,34 @@ func SyncProjectDir(sessionDir, rel string, active []catalog.Entry) (SyncResult,
 	}
 
 	var errs []error
-	var keep []string
-	for _, name := range owned {
+	keep := map[string]string{}
+	skipped := map[string]bool{}
+	for _, name := range sortedKeys(owned) {
+		recorded := owned[name]
+		if recorded == "" { // legacy entry: ours only if it already points at the wanted target
+			recorded = want[name]
+		}
 		path := filepath.Join(target, name)
 		st, err := os.Lstat(path)
-		if err != nil || st.Mode()&os.ModeSymlink == 0 {
-			continue // gone or replaced by the user: no longer ours
+		if errors.Is(err, os.ErrNotExist) {
+			continue
 		}
-		if dir, ok := want[name]; ok {
-			if cur, err := os.Readlink(path); err == nil && cur == dir {
-				keep = append(keep, name)
-				continue
-			}
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		cur, _ := os.Readlink(path)
+		if st.Mode()&os.ModeSymlink == 0 || recorded == "" || cur != recorded {
+			skipped[name] = true // replaced by the user or not ours: no longer owned, never touched
+			continue
+		}
+		if dir, ok := want[name]; ok && dir == cur {
+			keep[name] = cur
+			continue
 		}
 		if err := os.Remove(path); err != nil {
 			errs = append(errs, err)
-			keep = append(keep, name) // still ours, retry next time
+			keep[name] = cur // still ours, retry next time
 			continue
 		}
 		if _, ok := want[name]; !ok {
@@ -78,19 +94,14 @@ func SyncProjectDir(sessionDir, rel string, active []catalog.Entry) (SyncResult,
 		}
 	}
 
-	names := make([]string, 0, len(want))
-	for name := range want {
-		names = append(names, name)
-	}
-	sort.Strings(names)
 	created := false
-	for _, name := range names {
-		if slices.Contains(keep, name) {
+	for _, name := range sortedKeys(want) {
+		if _, ok := keep[name]; ok || skipped[name] {
 			continue
 		}
 		path := filepath.Join(target, name)
 		if _, err := os.Lstat(path); err == nil {
-			res.Skipped = append(res.Skipped, name)
+			skipped[name] = true
 			continue
 		} else if !errors.Is(err, os.ErrNotExist) {
 			errs = append(errs, err)
@@ -106,16 +117,16 @@ func SyncProjectDir(sessionDir, rel string, active []catalog.Entry) (SyncResult,
 			errs = append(errs, err)
 			continue
 		}
-		keep = append(keep, name)
+		keep[name] = want[name]
 	}
-	sort.Strings(keep)
-	res.Linked = keep
+	res.Linked = sortedKeys(keep)
+	res.Skipped = sortedKeys(skipped)
 
 	if err := writeManifest(target, keep); err != nil {
 		errs = append(errs, err)
 	}
 	if len(keep) > 0 {
-		if err := exclude(sessionDir, clean, keep); err != nil {
+		if err := exclude(sessionDir, clean, res.Linked); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -123,10 +134,19 @@ func SyncProjectDir(sessionDir, rel string, active []catalog.Entry) (SyncResult,
 	return res, errors.Join(errs...)
 }
 
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // linkNames maps each link name to its skill dir. The name is the skill name (the ID part after
 // ":"); when two active skills share it, marketplace skills get <plugin>-<name> (plugin = ID part
 // before ":"), so a local skill keeps the plain name. A name still taken goes to the first entry;
-// names that are not a single path element are skipped.
+// names that are not a single path element are skipped. Dirs are made absolute.
 func linkNames(active []catalog.Entry) map[string]string {
 	split := func(e catalog.Entry) (plugin, name string) {
 		if i := strings.Index(e.ID, ":"); i >= 0 {
@@ -151,15 +171,20 @@ func linkNames(active []catalog.Entry) map[string]string {
 		if !views.SafeName(name) || name == manifestFile || e.Skill.Dir == "" {
 			continue
 		}
+		dir, err := filepath.Abs(e.Skill.Dir)
+		if err != nil {
+			continue
+		}
 		if _, ok := out[name]; !ok {
-			out[name] = e.Skill.Dir
+			out[name] = dir
 		}
 	}
 	return out
 }
 
-// readManifest returns the owned link names; a missing manifest owns nothing.
-func readManifest(path string) ([]string, error) {
+// readManifest returns the owned links (name → recorded target, "" for legacy entries); a missing
+// manifest owns nothing.
+func readManifest(path string) (map[string]string, error) {
 	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -167,21 +192,37 @@ func readManifest(path string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var m manifest
-	if err := json.Unmarshal(b, &m); err != nil {
+	var raw struct {
+		Links json.RawMessage `json:"links"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	var out []string
-	for _, name := range m.Links {
-		if views.SafeName(name) && name != manifestFile && !slices.Contains(out, name) {
-			out = append(out, name)
+	links := map[string]string{}
+	if len(raw.Links) > 0 && raw.Links[0] == '[' {
+		var names []string
+		if err := json.Unmarshal(raw.Links, &names); err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+		for _, n := range names {
+			links[n] = ""
+		}
+	} else if len(raw.Links) > 0 && string(raw.Links) != "null" {
+		if err := json.Unmarshal(raw.Links, &links); err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	out := map[string]string{}
+	for name, t := range links {
+		if views.SafeName(name) && name != manifestFile {
+			out[name] = t
 		}
 	}
 	return out, nil
 }
 
 // writeManifest stores links in target, or removes the manifest when there are none.
-func writeManifest(target string, links []string) error {
+func writeManifest(target string, links map[string]string) error {
 	path := filepath.Join(target, manifestFile)
 	if len(links) == 0 {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -196,21 +237,26 @@ func writeManifest(target string, links []string) error {
 	return fsutil.WriteFileAtomic(path, append(b, '\n'), 0o644)
 }
 
-// exclude appends the manifest and link paths (relative to the work tree root, with a leading "/")
-// below excludeMarker to the info/exclude of the git repo containing sessionDir, skipping lines
-// already present. Outside a git work tree it does nothing.
+// exclude adds the manifest and link paths (relative to the work tree root, with a leading "/") to
+// the info/exclude of the git repo containing sessionDir, skipping lines already present. New lines
+// go at the end of the block under excludeMarker (the marker and the non-empty, non-comment lines
+// after it); without a marker a new block is appended. Outside a work tree, or when the git dir does
+// not exist, it does nothing.
 func exclude(sessionDir, rel string, links []string) error {
 	root, gitDir, err := findGit(sessionDir)
 	if err != nil || root == "" {
 		return err
 	}
+	if st, err := os.Stat(gitDir); err != nil || !st.IsDir() {
+		return nil
+	}
 	base, err := filepath.Rel(root, filepath.Join(sessionDir, rel))
 	if err != nil {
 		return err
 	}
-	lines := []string{"/" + filepath.ToSlash(filepath.Join(base, manifestFile))}
+	want := []string{"/" + filepath.ToSlash(filepath.Join(base, manifestFile))}
 	for _, l := range links {
-		lines = append(lines, "/"+filepath.ToSlash(filepath.Join(base, l)))
+		want = append(want, "/"+filepath.ToSlash(filepath.Join(base, l)))
 	}
 
 	path := filepath.Join(gitDir, "info", "exclude")
@@ -218,33 +264,42 @@ func exclude(sessionDir, rel string, links []string) error {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	present := map[string]bool{}
+	var lines []string
 	sc := bufio.NewScanner(bytes.NewReader(old))
 	for sc.Scan() {
-		present[strings.TrimSpace(sc.Text())] = true
+		lines = append(lines, sc.Text())
+	}
+	present := map[string]bool{}
+	for _, l := range lines {
+		present[strings.TrimSpace(l)] = true
 	}
 	var add []string
-	if !present[excludeMarker] {
-		add = append(add, excludeMarker)
-	}
-	for _, l := range lines {
+	for _, l := range want {
 		if !present[l] {
 			add = append(add, l)
 		}
 	}
-	if len(add) == 0 || (len(add) == 1 && add[0] == excludeMarker) {
+	if len(add) == 0 {
 		return nil
 	}
-	var buf bytes.Buffer
-	buf.Write(old)
-	if len(old) > 0 && old[len(old)-1] != '\n' {
-		buf.WriteByte('\n')
+	at := slices.IndexFunc(lines, func(l string) bool { return strings.TrimSpace(l) == excludeMarker })
+	if at < 0 {
+		lines = append(lines, excludeMarker)
+		at = len(lines) - 1
 	}
-	buf.WriteString(strings.Join(add, "\n") + "\n")
+	end := at + 1
+	for end < len(lines) {
+		l := strings.TrimSpace(lines[end])
+		if l == "" || strings.HasPrefix(l, "#") {
+			break
+		}
+		end++
+	}
+	lines = slices.Insert(lines, end, add...)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	return fsutil.WriteFileAtomic(path, buf.Bytes(), 0o644)
+	return fsutil.WriteFileAtomic(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
 }
 
 // findGit walks up from dir to the first folder with a .git entry and returns that work tree root

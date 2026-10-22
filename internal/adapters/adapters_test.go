@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -110,11 +111,19 @@ func manifestLinks(t *testing.T, dir string) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var m struct{ Links []string }
+	var m struct{ Links map[string]string }
 	if err := json.Unmarshal(b, &m); err != nil {
 		t.Fatal(err)
 	}
-	return m.Links
+	var names []string
+	for name, target := range m.Links {
+		if !filepath.IsAbs(target) {
+			t.Errorf("manifest target of %s not absolute: %q", name, target)
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func isLinkTo(t *testing.T, path, target string) bool {
@@ -322,5 +331,118 @@ func TestSyncNameCollision(t *testing.T) {
 	target := filepath.Join(session, rel)
 	if !isLinkTo(t, filepath.Join(target, "outline"), active[0].Skill.Dir) || !isLinkTo(t, filepath.Join(target, "writing-outline"), active[1].Skill.Dir) {
 		t.Fatal("collision links wrong")
+	}
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSyncForeignSymlink(t *testing.T) {
+	session := t.TempDir()
+	target := filepath.Join(session, rel)
+	src := t.TempDir()
+	beta, gamma := skillDir(t, src, "beta"), skillDir(t, src, "gamma")
+	foreign := skillDir(t, t.TempDir(), "foreign")
+	// the manifest claims beta and gamma, but both are the user's links to a foreign dir
+	writeFile(t, filepath.Join(target, ".skilltri.json"), `{"links":{"beta":"`+beta+`","gamma":"`+gamma+`"}}`)
+	for _, name := range []string{"beta", "gamma"} {
+		if err := os.Symlink(foreign, filepath.Join(target, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res, err := SyncProjectDir(session, rel, []catalog.Entry{entry("beta", "", beta)}) // (a) beta active, (b) gamma not
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Linked) != 0 || len(res.Removed) != 0 || !reflect.DeepEqual(res.Skipped, []string{"beta", "gamma"}) {
+		t.Fatalf("sync = %+v", res)
+	}
+	for _, name := range []string{"beta", "gamma"} {
+		if !isLinkTo(t, filepath.Join(target, name), foreign) {
+			t.Fatalf("user link %s touched", name)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(target, ".skilltri.json")); !os.IsNotExist(err) {
+		t.Fatalf("manifest kept without owned links: %v", err)
+	}
+}
+
+func TestSyncLegacyManifest(t *testing.T) {
+	session := t.TempDir()
+	target := filepath.Join(session, rel)
+	src := t.TempDir()
+	beta := skillDir(t, src, "beta")
+	foreign := skillDir(t, t.TempDir(), "foreign")
+	writeFile(t, filepath.Join(target, ".skilltri.json"), `{"links":["beta","old"]}`)
+	if err := os.Symlink(beta, filepath.Join(target, "beta")); err != nil { // matches the wanted target: ours
+		t.Fatal(err)
+	}
+	if err := os.Symlink(foreign, filepath.Join(target, "old")); err != nil { // no recorded target: not ours
+		t.Fatal(err)
+	}
+	res, err := SyncProjectDir(session, rel, []catalog.Entry{entry("beta", "", beta)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(res.Linked, []string{"beta"}) || len(res.Removed) != 0 || !reflect.DeepEqual(res.Skipped, []string{"old"}) {
+		t.Fatalf("sync = %+v", res)
+	}
+	if !isLinkTo(t, filepath.Join(target, "old"), foreign) {
+		t.Fatal("legacy entry without target touched")
+	}
+	if got := manifestLinks(t, target); !reflect.DeepEqual(got, []string{"beta"}) {
+		t.Fatalf("manifest = %v", got)
+	}
+}
+
+func TestSyncExcludeBlock(t *testing.T) {
+	root := gitRepo(t)
+	exc := filepath.Join(root, ".git", "info", "exclude")
+	writeFile(t, exc, "# skilltri\n/other\n\n*.log\n")
+	src := t.TempDir()
+	if _, err := SyncProjectDir(root, rel, []catalog.Entry{entry("alpha", "", skillDir(t, src, "alpha"))}); err != nil {
+		t.Fatal(err)
+	}
+	want := "# skilltri\n/other\n/.agents/skills/.skilltri.json\n/.agents/skills/alpha\n\n*.log\n"
+	if got := readExclude(t, filepath.Join(root, ".git")); got != want {
+		t.Fatalf("exclude =\n%s\nwant\n%s", got, want)
+	}
+}
+
+func TestSyncBogusGitDir(t *testing.T) {
+	root := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "gone.git")
+	writeFile(t, filepath.Join(root, ".git"), "gitdir: "+missing+"\n")
+	src := t.TempDir()
+	res, err := SyncProjectDir(root, rel, []catalog.Entry{entry("alpha", "", skillDir(t, src, "alpha"))})
+	if err != nil || !reflect.DeepEqual(res.Linked, []string{"alpha"}) {
+		t.Fatalf("sync = %+v, %v", res, err)
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatalf("bogus gitdir created: %v", err)
+	}
+}
+
+func TestSyncRelativeSkillDir(t *testing.T) {
+	session := t.TempDir()
+	src := t.TempDir()
+	skillDir(t, src, "alpha")
+	t.Chdir(src)
+	if _, err := SyncProjectDir(session, rel, []catalog.Entry{entry("alpha", "", "alpha")}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.Readlink(filepath.Join(session, rel, "alpha"))
+	if err != nil || !filepath.IsAbs(got) || filepath.Base(got) != "alpha" {
+		t.Fatalf("link target = %q, %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(session, rel, "alpha", "SKILL.md")); err != nil {
+		t.Fatalf("link does not resolve: %v", err)
 	}
 }
