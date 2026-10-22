@@ -15,6 +15,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/baeroe/skilltri/internal/fsutil"
 	"github.com/baeroe/skilltri/internal/rules"
 )
 
@@ -207,32 +208,7 @@ func Update(path string, fn func(*Config) error) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(path, append(b, '\n'))
-}
-
-func writeAtomic(path string, b []byte) error {
-	f, err := os.CreateTemp(filepath.Dir(path), ".config-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	defer os.Remove(tmp) // no-op after a successful rename
-	if err := f.Chmod(0o600); err != nil {
-		f.Close()
-		return err
-	}
-	if _, err := f.Write(b); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil { // the rename must never publish a file whose data is not on disk
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return fsutil.WriteFileAtomic(path, append(b, '\n'), 0o600)
 }
 
 // Validate returns the first problem found (servers in name order), naming the server.

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/baeroe/skilltri/internal/config"
+	"github.com/baeroe/skilltri/internal/fsutil"
 	"github.com/baeroe/skilltri/internal/marketplace"
 	"github.com/baeroe/skilltri/internal/paths"
 	"github.com/baeroe/skilltri/internal/skilllock"
@@ -488,28 +489,7 @@ func Save(path string, c *Catalog) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(filepath.Dir(path), ".catalog-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	defer os.Remove(tmp) // no-op after a successful rename
-	if err := f.Chmod(0o600); err != nil {
-		f.Close()
-		return err
-	}
-	if _, err := f.Write(append(b, '\n')); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return fsutil.WriteFileAtomic(path, append(b, '\n'), 0o600)
 }
 
 // Load reads a catalog written by Save. A missing file is an error matching os.ErrNotExist.
