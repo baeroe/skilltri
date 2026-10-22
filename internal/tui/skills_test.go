@@ -494,7 +494,10 @@ func TestUpdateAllCancellable(t *testing.T) {
 	if v := screen(h); !strings.Contains(v, "stopped waiting for the daemon") {
 		t.Errorf("daemon cancel:\n%s", v)
 	}
-	waitMsgs(t, out)
+	for _, msg := range waitMsgs(t, out) { // the stopped run ends; a new update may start
+		_, cmd := h.m.Update(msg)
+		h.run(cmd)
+	}
 	if !slices.Equal(via, []bool{false, true}) {
 		t.Errorf("viaDaemon = %v", via)
 	}
@@ -735,4 +738,43 @@ func TestDefaultUpdateSources(t *testing.T) {
 		t.Errorf("cancelled update err = %v, want context.Canceled", err)
 	}
 	hasAlpha("cancelled")
+}
+
+// TestUpdateAfterCancelWaitsForTheStoppingRun: a cancelled offline update still syncs, builds and
+// saves until it notices; a new update must not start on the same checkouts meanwhile.
+func TestUpdateAfterCancelWaitsForTheStoppingRun(t *testing.T) {
+	h := newHarness(t, TabSkills)
+	demoSkills(h)
+	h.load()
+	started := make(chan []string, 2)
+	release := make(chan struct{})
+	calls := 0
+	h.m.opts.Update = func(ctx context.Context, names []string, viaDaemon bool) (daemon.UpdateReply, error) {
+		calls++
+		started <- names
+		<-ctx.Done()
+		<-release // still saving the catalog
+		return daemon.UpdateReply{}, ctx.Err()
+	}
+	out := startBlocked(t, h, "U", started)
+	h.key("esc")
+	h.key("U")
+	if v := screen(h); !strings.Contains(v, "previous update still stopping") {
+		t.Errorf("second update not refused while the first stops:\n%s", v)
+	}
+	h.key("u")
+	if calls != 1 {
+		t.Fatalf("update started %d times while the cancelled one was still running", calls)
+	}
+	close(release)
+	for _, msg := range waitMsgs(t, out) {
+		_, cmd := h.m.Update(msg)
+		h.run(cmd)
+	}
+	out = startBlocked(t, h, "U", started)
+	if calls != 2 {
+		t.Fatalf("update did not start after the cancelled one ended (calls %d)", calls)
+	}
+	h.m.Update(keyMsg("ctrl+c"))
+	waitMsgs(t, out)
 }

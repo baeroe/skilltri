@@ -31,6 +31,9 @@ type skillsTab struct {
 
 	upd     *updateRun                     // the running update (nil: none)
 	updGen  int                            // generation of the last started update
+	// stopping is the generation of a cancelled update that has not returned yet (0: none). Its
+	// goroutine may still sync, build and save; no new update starts on the checkouts meanwhile.
+	stopping int
 	results map[string]catalog.SourceState // last update result per source / remote plugin
 }
 
@@ -150,6 +153,9 @@ func (t *skillsTab) update(m *Model, msg tea.Msg) tea.Cmd {
 	case snapshotMsg:
 		t.resolve(m)
 	case updateDoneMsg:
+		if msg.gen == t.stopping {
+			t.stopping = 0
+		}
 		if t.upd == nil || msg.gen != t.upd.gen {
 			return nil // cancelled: already reported
 		}
@@ -392,6 +398,10 @@ func (t *skillsTab) startUpdate(m *Model, names []string, what string) tea.Cmd {
 		m.flash("an update is already running (esc cancels it)", true)
 		return nil
 	}
+	if t.stopping != 0 {
+		m.flash("previous update still stopping, try again in a moment", true)
+		return nil
+	}
 	if !m.begin(updateWork, "updating "+what+" … (esc cancels)") {
 		return nil
 	}
@@ -406,9 +416,11 @@ func (t *skillsTab) startUpdate(m *Model, names []string, what string) tea.Cmd {
 	}
 }
 
-// cancelUpdate cancels the running update; its late result is ignored.
+// cancelUpdate cancels the running update; its late result is ignored, but no new update starts
+// until it has arrived.
 func (t *skillsTab) cancelUpdate(m *Model) {
 	t.upd.cancel()
+	t.stopping = t.upd.gen
 	if t.upd.viaDaemon {
 		m.flash("stopped waiting for the daemon (it finishes the update in the background)", false)
 	} else {
