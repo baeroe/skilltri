@@ -21,6 +21,7 @@ const agentsSkills = ".agents/skills"
 // Adapter describes how skilltri delivers skills to one harness.
 type Adapter struct {
 	ID, Display string
+	Binary      string   // the harness command `skilltri run` starts
 	Method      string   // MethodClaudePluginDirs | MethodProjectDir
 	ProjectDir  string   // folder below the session folder for MethodProjectDir
 	ClientNames []string // MCP clientInfo names of this harness
@@ -29,13 +30,13 @@ type Adapter struct {
 
 // Registry lists every known harness.
 var Registry = []Adapter{
-	{ID: "claude-code", Display: "Claude Code", Method: MethodClaudePluginDirs, ClientNames: []string{"claude-code"}, DetectPaths: []string{".claude"}},
-	{ID: "codex", Display: "Codex", Method: MethodProjectDir, ProjectDir: agentsSkills, DetectPaths: []string{".codex"}},
-	{ID: "gemini-cli", Display: "Gemini CLI", Method: MethodProjectDir, ProjectDir: agentsSkills, DetectPaths: []string{".gemini"}},
-	{ID: "opencode", Display: "OpenCode", Method: MethodProjectDir, ProjectDir: agentsSkills, DetectPaths: []string{".config/opencode"}},
-	{ID: "cursor", Display: "Cursor", Method: MethodProjectDir, ProjectDir: agentsSkills, DetectPaths: []string{".cursor"}},
-	{ID: "github-copilot", Display: "GitHub Copilot CLI", Method: MethodProjectDir, ProjectDir: agentsSkills, DetectPaths: []string{".copilot"}},
-	{ID: "amp", Display: "Amp", Method: MethodProjectDir, ProjectDir: agentsSkills, DetectPaths: []string{".config/amp"}},
+	{ID: "claude-code", Display: "Claude Code", Binary: "claude", Method: MethodClaudePluginDirs, ClientNames: []string{"claude-code"}, DetectPaths: []string{".claude"}},
+	{ID: "codex", Display: "Codex", Binary: "codex", Method: MethodProjectDir, ProjectDir: agentsSkills, DetectPaths: []string{".codex"}},
+	{ID: "gemini-cli", Display: "Gemini CLI", Binary: "gemini", Method: MethodProjectDir, ProjectDir: agentsSkills, DetectPaths: []string{".gemini"}},
+	{ID: "opencode", Display: "OpenCode", Binary: "opencode", Method: MethodProjectDir, ProjectDir: agentsSkills, DetectPaths: []string{".config/opencode"}},
+	{ID: "cursor", Display: "Cursor", Binary: "cursor-agent", Method: MethodProjectDir, ProjectDir: agentsSkills, DetectPaths: []string{".cursor"}},
+	{ID: "github-copilot", Display: "GitHub Copilot CLI", Binary: "copilot", Method: MethodProjectDir, ProjectDir: agentsSkills, DetectPaths: []string{".copilot"}},
+	{ID: "amp", Display: "Amp", Binary: "amp", Method: MethodProjectDir, ProjectDir: agentsSkills, DetectPaths: []string{".config/amp"}},
 }
 
 // ByID returns the adapter with id.

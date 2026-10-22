@@ -78,6 +78,7 @@ func TestDiscover(t *testing.T) {
 	writeSkill(t, filepath.Join(root, "group", "b"), strings.Replace(ok, "%s", "b", 1))
 	writeSkill(t, filepath.Join(root, ".git", "c"), strings.Replace(ok, "%s", "c", 1))
 	writeSkill(t, filepath.Join(root, "node_modules", "d"), strings.Replace(ok, "%s", "d", 1))
+	writeSkill(t, filepath.Join(root, ".import-123", "e"), strings.Replace(ok, "%s", "e", 1)) // leftover temp dir
 
 	got, warns := Discover(root)
 	if len(warns) != 0 {

@@ -29,9 +29,10 @@ func TestRegistry(t *testing.T) {
 			t.Errorf("%s: method %q dir %q", a.ID, a.Method, a.ProjectDir)
 		}
 	}
-	for _, id := range []string{"claude-code", "codex", "gemini-cli", "opencode", "cursor", "github-copilot", "amp"} {
-		if !seen[id] {
-			t.Errorf("missing adapter %s", id)
+	for id, bin := range map[string]string{"claude-code": "claude", "codex": "codex", "gemini-cli": "gemini", "opencode": "opencode",
+		"cursor": "cursor-agent", "github-copilot": "copilot", "amp": "amp"} {
+		if a, ok := ByID(id); !ok || a.Binary != bin {
+			t.Errorf("adapter %s: %+v, want binary %s", id, a, bin)
 		}
 	}
 	cc, ok := ByID("claude-code")

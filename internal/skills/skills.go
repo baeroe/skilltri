@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
@@ -141,7 +142,7 @@ func Discover(root string) ([]Skill, []string) {
 		}
 		for _, e := range entries {
 			name := e.Name()
-			if name == ".git" || name == "node_modules" {
+			if strings.HasPrefix(name, ".") || name == "node_modules" { // .git, leftover temp dirs like .import-*
 				continue
 			}
 			path := filepath.Join(dir, name)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -31,9 +32,11 @@ func editConfig(fn func(*config.Config) error) error {
 func RefreshCatalog() { refreshCatalog() }
 
 // refreshCatalog rebuilds and saves the catalog offline (no git) when no daemon runs; a running
-// daemon watches the config and rebuilds on its own. Failures are reported but not fatal.
+// daemon watches the config and rebuilds on its own. Any failure to connect counts as no daemon;
+// a daemon that accepted the connection is left to rebuild, even if it did not answer. Failures
+// are reported but not fatal.
 func refreshCatalog() {
-	if err := daemon.Control(paths.SocketPath(), daemon.Hello{Cmd: "status"}, nil); !notRunning(err) {
+	if err := daemon.Control(paths.SocketPath(), daemon.Hello{Cmd: "status"}, nil); !dialFailed(err) {
 		return
 	}
 	cfg, err := config.Load(paths.ConfigFile())
@@ -49,6 +52,12 @@ func refreshCatalog() {
 func offlineCatalog(cfg *config.Config) *catalog.Catalog {
 	c, _ := daemon.DefaultBuilder().Build(context.Background(), cfg, false)
 	return c
+}
+
+// dialFailed reports whether err is a failure to connect to the daemon socket at all.
+func dialFailed(err error) bool {
+	var op *net.OpError
+	return errors.As(err, &op) && op.Op == "dial"
 }
 
 func fail(err error) int {

@@ -24,8 +24,11 @@ const (
 // Finding is one problem or hint: Check names the check, Subject what it is about, Fix how to
 // resolve it ("" when there is nothing to run).
 type Finding struct {
-	Severity                     string // "error" | "warning" | "info"
-	Check, Subject, Message, Fix string
+	Severity string `json:"severity"` // "error" | "warning" | "info"
+	Check    string `json:"check"`
+	Subject  string `json:"subject"`
+	Message  string `json:"message"`
+	Fix      string `json:"fix"`
 }
 
 // Env is where the checks look; injectable for tests. StatePath is the skill lock, the catalog is

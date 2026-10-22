@@ -464,3 +464,25 @@ func TestRenderWhichPluginSkill(t *testing.T) {
 		}
 	}
 }
+
+// TestRefreshCatalogAnyDialError: a socket that cannot even be dialed (here a path too long for a
+// unix socket) means no daemon, so the CLI rebuilds the catalog itself.
+func TestRefreshCatalogAnyDialError(t *testing.T) {
+	sandbox(t)
+	t.Setenv("SKILLTRI_SOCKET", filepath.Join(t.TempDir(), strings.Repeat("x", 120), "d.sock"))
+	local := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(local, "alpha"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(local, "alpha", "SKILL.md"), []byte("---\nname: alpha\ndescription: Demo.\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if code := SourceAdd(&out, "mine", config.Source{Type: "local", Path: local}); code != 0 {
+		t.Fatal("add failed")
+	}
+	c, err := catalog.Load(catalog.Path())
+	if err != nil || len(c.Skills) != 1 {
+		t.Fatalf("catalog not rebuilt: %+v %v", c, err)
+	}
+}

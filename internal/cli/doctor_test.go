@@ -49,6 +49,11 @@ func TestDoctorExitCode(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &fs); err != nil || len(fs) == 0 || fs[0].Severity != "error" || fs[0].Check != "config" {
 		t.Errorf("json = %s (%v)", out.String(), err)
 	}
+	for _, key := range []string{`"severity":`, `"check":`, `"subject":`, `"message":`, `"fix":`} {
+		if !strings.Contains(out.String(), key) {
+			t.Errorf("json lacks %s: %s", key, out.String())
+		}
+	}
 }
 
 func TestDoctorCleanJSON(t *testing.T) {

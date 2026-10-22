@@ -700,7 +700,7 @@ func runShellInit(args []string) int {
 }
 
 // runHarness implements `skilltri run HARNESS [args...]`: it computes the skill env of the working
-// directory and execs the harness binary (claude for claude-code, else the adapter id) with it,
+// directory and execs the harness binary (adapters.Adapter.Binary) with it,
 // passing args through unchanged.
 func runHarness(args []string) int {
 	var ids []string
@@ -716,10 +716,7 @@ func runHarness(args []string) int {
 		fmt.Fprintf(os.Stderr, "skilltri run: unknown harness %q (known: %s)\n", args[0], strings.Join(ids, ", "))
 		return 2
 	}
-	bin := a.ID
-	if a.ID == "claude-code" {
-		bin = "claude"
-	}
+	bin := a.Binary
 	path, err := exec.LookPath(bin)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "skilltri run: %s not found on PATH\n", bin)

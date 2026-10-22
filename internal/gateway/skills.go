@@ -173,7 +173,7 @@ func (s *Session) readSkillFile(_ context.Context, req *mcp.CallToolRequest) (*m
 // after resolving symlinks (Review Focus 5); files over maxSkillFile are refused.
 func readInside(dir, rel string) (string, error) {
 	clean := filepath.Clean(rel)
-	if rel == "" || filepath.IsAbs(rel) || strings.HasPrefix(clean, "..") {
+	if rel == "" || !filepath.IsLocal(clean) { // "..notes.md" is fine, "../x" is not
 		return "", fmt.Errorf("path %q must be relative to the skill folder", rel)
 	}
 	root, err := filepath.EvalSymlinks(dir)

@@ -163,6 +163,12 @@ func TestReadSkillFileTraversal(t *testing.T) {
 			t.Errorf("path %q leaked content: %q", p, text)
 		}
 	}
+	if err := os.WriteFile(filepath.Join(alpha, "..notes.md"), []byte("dots"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if text, isErr := callSkillTool(t, h, "skilltri_read_skill_file", map[string]any{"name": "alpha", "path": "..notes.md"}); isErr || text != "dots" {
+		t.Errorf("..notes.md: %q, error %v", text, isErr)
+	}
 	if text, _ := callSkillTool(t, h, "skilltri_read_skill_file", map[string]any{"name": "alpha", "path": "big.txt"}); !strings.Contains(text, "256 KiB") {
 		t.Errorf("big file error does not name the limit: %q", text)
 	}
