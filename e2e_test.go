@@ -399,3 +399,51 @@ func TestUnknownMethod(t *testing.T) {
 		t.Error("shim did not exit after stdin EOF")
 	}
 }
+
+// A shim-started daemon gets a defined environment: the harness's own variables never reach the
+// downstream servers, and `daemon stop` ends it.
+func TestDaemonEnvironmentAndStop(t *testing.T) {
+	sb := newSandbox(t)
+	envFile := filepath.Join(t.TempDir(), "env")
+	srv := &config.Server{Type: "stdio", Command: "sh", Args: []string{"-c", `env > "$ENV_FILE"; exec "$FAKE"`},
+		Env: map[string]string{"ENV_FILE": envFile, "FAKE": fakeBin, "FAKEMCP_NAME": "envy", "FAKEMCP_TOOLS": "e"}}
+	sb.writeConfig(t, &config.Config{Version: 1, Servers: map[string]*config.Server{"envy": srv}})
+	sb.env = append(sb.env, "DEMO_HARNESS_TOKEN=demo-secret", "SKILLTRI_CWD=/nowhere")
+	cs := sb.connect(t, t.TempDir(), noRoots())
+	if got := toolNames(t, cs); !slices.Equal(got, []string{"envy_e"}) {
+		t.Fatalf("tools = %v", got)
+	}
+	b, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := string(b)
+	for _, bad := range []string{"DEMO_HARNESS_TOKEN=", "SKILLTRI_CWD="} {
+		if strings.Contains(env, bad) {
+			t.Errorf("downstream env has %s:\n%s", bad, env)
+		}
+	}
+	for _, want := range []string{"HOME=", "PATH=", "SKILLTRI_SOCKET=" + sb.sock} {
+		if !strings.Contains(env, want) {
+			t.Errorf("downstream env lacks %s:\n%s", want, env)
+		}
+	}
+	if st := sb.status(t); st.Path == "" {
+		t.Error("status has no daemon PATH")
+	}
+
+	cs.Close()
+	cmd := exec.Command(skilltriBin, "daemon", "stop")
+	cmd.Env = sb.env
+	if out, err := cmd.CombinedOutput(); err != nil || !strings.Contains(string(out), "daemon stopped") {
+		t.Fatalf("daemon stop: %v: %s", err, out)
+	}
+	if _, err := os.Stat(sb.sock); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("socket still there after stop: %v", err)
+	}
+	cmd = exec.Command(skilltriBin, "daemon", "stop")
+	cmd.Env = sb.env
+	if out, err := cmd.CombinedOutput(); err != nil || !strings.Contains(string(out), "daemon not running") {
+		t.Fatalf("second daemon stop: %v: %s", err, out)
+	}
+}

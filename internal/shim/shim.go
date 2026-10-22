@@ -55,7 +55,8 @@ func Dial(socket string, start func() error) (net.Conn, error) {
 
 // StartDetached starts `exe daemon` in its own session, so it outlives the shim and the
 // harness. stdin is /dev/null and stdout and stderr append to the daemon log. It runs in the
-// home directory, which downstream servers without a cwd inherit, not in the harness's project.
+// home directory, which downstream servers without a cwd inherit, not in the harness's project,
+// and with daemonEnv instead of the harness's environment.
 func StartDetached(exe string) error {
 	if err := os.MkdirAll(paths.StateDir(), 0o700); err != nil {
 		return err
@@ -73,6 +74,7 @@ func StartDetached(exe string) error {
 
 	cmd := exec.Command(exe, "daemon")
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = null, logf, logf
+	cmd.Env = daemonEnv(os.Environ(), loginShellPath)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if home, err := os.UserHomeDir(); err == nil {
 		cmd.Dir = home

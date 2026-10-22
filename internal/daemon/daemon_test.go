@@ -577,3 +577,86 @@ func TestShutdownWithPendingHello(t *testing.T) {
 		t.Fatal("Run waited for a connection that never sent its hello")
 	}
 }
+
+// A daemon with Wait queues behind the one holding the lock and serves once it exits.
+func TestWaitTakesOver(t *testing.T) {
+	e := newEnv(t)
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	defer cancel1()
+	done1 := make(chan error, 1)
+	go func() { done1 <- New(e.options()).Run(ctx1) }()
+	eventually(t, 5*time.Second, "first daemon up", func() bool {
+		return Control(e.sock, Hello{Cmd: "status"}, nil) == nil
+	})
+
+	o := e.options()
+	o.Wait, o.Version = true, "second"
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	done2 := make(chan error, 1)
+	go func() { done2 <- New(o).Run(ctx2) }()
+	select {
+	case err := <-done2:
+		t.Fatalf("waiting daemon returned: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if st := e.status(t); st.Version != "test" {
+		t.Fatalf("version = %q, want the first daemon", st.Version)
+	}
+
+	cancel1()
+	if err := <-done1; err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	eventually(t, 5*time.Second, "second daemon serves", func() bool {
+		var st StatusReply
+		return Control(e.sock, Hello{Cmd: "status"}, &st) == nil && st.Version == "second"
+	})
+	cancel2()
+	select {
+	case err := <-done2:
+		if err != nil {
+			t.Fatalf("second Run: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("second Run did not return")
+	}
+}
+
+func TestWaitCancelled(t *testing.T) {
+	e := newEnv(t)
+	e.start(t)
+	o := e.options()
+	o.Wait = true
+	o.SocketPath = filepath.Join(e.dir, "other.sock")
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if err := New(o).Run(ctx); err != nil {
+		t.Fatalf("cancelled waiting Run = %v, want nil", err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("waiting Run took %v after cancel", d)
+	}
+	e.status(t) // the first daemon is unaffected
+}
+
+func TestStatusPath(t *testing.T) {
+	e := newEnv(t)
+	e.start(t)
+	if st := e.status(t); st.Path != os.Getenv("PATH") {
+		t.Fatalf("status Path = %q, want %q", st.Path, os.Getenv("PATH"))
+	}
+}
+
+func TestControlShutdown(t *testing.T) {
+	e := newEnv(t)
+	e.start(t) // its cleanup checks that Run returned nil and removed the socket
+	if err := Control(e.sock, Hello{Cmd: "shutdown"}, nil); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	eventually(t, 5*time.Second, "socket removed", func() bool {
+		_, err := os.Stat(e.sock)
+		return errors.Is(err, os.ErrNotExist)
+	})
+}

@@ -24,6 +24,7 @@ const controlTimeout = 30 * time.Second
 type StatusReply struct {
 	PID         int
 	Version     string
+	Path        string // the daemon's PATH, which stdio servers inherit
 	ConfigError string
 	Servers     []downstream.ServerStatus // every configured server; never started ones are "stopped"
 	Sessions    []gateway.SessionInfo
@@ -109,6 +110,9 @@ func (d *Daemon) control(conn net.Conn, h Hello, herr error) {
 			result = d.status()
 		case "which":
 			result, err = d.which(h)
+		case "shutdown":
+			defer d.cancel() // after the reply is written; Run then stops like on SIGTERM
+			d.log.Printf("shutdown requested")
 		default:
 			err = fmt.Errorf("unknown control command %q", h.Cmd)
 		}
@@ -127,7 +131,7 @@ func (d *Daemon) control(conn net.Conn, h Hello, herr error) {
 
 func (d *Daemon) status() StatusReply {
 	d.mu.Lock()
-	st := StatusReply{PID: os.Getpid(), Version: d.o.Version, ConfigError: d.configErr}
+	st := StatusReply{PID: os.Getpid(), Version: d.o.Version, Path: os.Getenv("PATH"), ConfigError: d.configErr}
 	for _, s := range d.sessions {
 		info := s.gw.Info()
 		info.ClientName = s.client

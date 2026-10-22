@@ -127,7 +127,8 @@ Bubble Tea v1 + bubbles + lipgloss, built like tussh's TUI (two panes, single co
 ```
 skilltri                      open the TUI
 skilltri mcp                  MCP server on stdio (registered in your harness)
-skilltri daemon               run the daemon in the foreground
+skilltri daemon [--wait]      run the daemon in the foreground (--wait: queue behind a running one)
+skilltri daemon stop          stop the running daemon
 skilltri daemon install       install/remove the launchd agent (systemd user unit on Linux)
 skilltri update [source]      fetch sources now
 skilltri status [--json]      daemon, servers, sources

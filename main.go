@@ -32,7 +32,9 @@ const usage = `skilltri - MCP gateway and agent skill manager
 Usage:
   skilltri                  open the TUI (arrives in a later version)
   skilltri mcp [--cwd DIR]  run the MCP shim on stdio (started by your agent harness)
-  skilltri daemon           run the gateway daemon in the foreground
+  skilltri daemon [--wait]  run the gateway daemon in the foreground
+                            (--wait: wait for a running daemon to exit, then take over)
+  skilltri daemon stop      stop the running daemon
   skilltri daemon install   install and start the daemon as a login service
   skilltri daemon uninstall stop and remove the login service
   skilltri status [--json]  show daemon, servers and config errors
@@ -83,14 +85,20 @@ func run(args []string) int {
 	}
 }
 
-// runDaemon runs the gateway daemon in the foreground until SIGINT or SIGTERM, logging to stderr.
+// runDaemon runs the gateway daemon in the foreground until SIGINT, SIGTERM or `daemon stop`,
+// logging to stderr. With --wait it queues behind a running daemon instead of exiting.
 func runDaemon(args []string) int {
+	wait := false
 	if len(args) > 0 {
-		switch args[0] {
-		case "install", "uninstall":
+		switch {
+		case len(args) == 1 && (args[0] == "install" || args[0] == "uninstall"):
 			return runService(args[0])
+		case len(args) == 1 && args[0] == "stop":
+			return cli.Stop(os.Stdout)
+		case len(args) == 1 && args[0] == "--wait":
+			wait = true
 		default:
-			fmt.Fprint(os.Stderr, "usage: skilltri daemon [install | uninstall]\n")
+			fmt.Fprint(os.Stderr, "usage: skilltri daemon [--wait | stop | install | uninstall]\n")
 			return 2
 		}
 	}
@@ -103,6 +111,7 @@ func runDaemon(args []string) int {
 		LockPath:   paths.DaemonLock(),
 		Version:    version,
 		Logger:     log.New(os.Stderr, "skilltri daemon: ", log.LstdFlags),
+		Wait:       wait,
 	})
 	if err := d.Run(ctx); err != nil {
 		if errors.Is(err, daemon.ErrAlreadyRunning) {

@@ -50,15 +50,19 @@ type Options struct {
 	PollInterval                     time.Duration // config file check; 0 → 1s
 	RetryInterval                    time.Duration // re-Refresh of all sessions so failed servers reappear; 0 → 30s
 	ConnectRefresh                   time.Duration // bound of the Refresh before initialize; 0 → 3s
+	// Wait makes Run wait for the lock instead of returning ErrAlreadyRunning (`daemon --wait`,
+	// used by the login service, so it takes over when a shim-started daemon exits).
+	Wait bool
 }
 
 // Daemon serves sessions and control requests. Create it with New and start it with Run.
 type Daemon struct {
-	o   Options
-	log *log.Logger
-	cfg atomic.Pointer[config.Config] // never nil once Run started
-	mgr *downstream.Manager
-	ctx context.Context // Run's context; cancelled on shutdown
+	o      Options
+	log    *log.Logger
+	cfg    atomic.Pointer[config.Config] // never nil once Run started
+	mgr    *downstream.Manager
+	ctx    context.Context // Run's context; cancelled on shutdown
+	cancel context.CancelFunc
 
 	mu        sync.Mutex
 	configErr string
@@ -94,8 +98,9 @@ func New(o Options) *Daemon {
 	return &Daemon{o: o, log: l, sessions: map[string]*session{}}
 }
 
-// Run takes the lock, listens on the socket and serves until ctx is cancelled. It returns
-// ErrAlreadyRunning if another daemon holds the lock.
+// Run takes the lock, listens on the socket and serves until ctx is cancelled or a shutdown
+// control request arrives. It returns ErrAlreadyRunning if another daemon holds the lock, unless
+// Options.Wait is set: then it waits for the lock (returning nil if ctx ends first).
 func (d *Daemon) Run(ctx context.Context) error {
 	for _, p := range []string{d.o.LockPath, d.o.SocketPath} {
 		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
@@ -103,6 +108,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 	}
 	unlock, err := tryLock(d.o.LockPath)
+	if errors.Is(err, ErrAlreadyRunning) && d.o.Wait {
+		d.log.Printf("another daemon holds %s, waiting for it to exit", d.o.LockPath)
+		unlock, err = waitLock(ctx, d.o.LockPath)
+		if ctx.Err() != nil {
+			return nil
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -148,7 +160,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	d.ctx = ctx
+	d.ctx, d.cancel = ctx, cancel
 	var loops sync.WaitGroup
 	loops.Add(3)
 	go func() { defer loops.Done(); d.watch(ctx, sig) }()

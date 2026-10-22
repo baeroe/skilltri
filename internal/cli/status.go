@@ -1,4 +1,4 @@
-// Package cli implements the read-only commands that talk to the daemon: `status` and `which`.
+// Package cli implements the commands that talk to the daemon: `status`, `which` and `daemon stop`.
 // Both ask the running daemon over the control socket; `which` falls back to the config file
 // when none runs, so folder rules can be checked before the daemon is up.
 package cli
@@ -55,6 +55,9 @@ func Status(w io.Writer, jsonOut bool) int {
 
 func renderStatus(w io.Writer, r daemon.StatusReply) {
 	fmt.Fprintf(w, "daemon: running (pid %d, version %s)\n", r.PID, r.Version)
+	if r.Path != "" {
+		fmt.Fprintf(w, "path: %s\n", r.Path)
+	}
 	if r.ConfigError != "" {
 		fmt.Fprintf(w, "config error: %s\n", r.ConfigError)
 	}

@@ -2,11 +2,13 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/baeroe/skilltri/internal/daemon"
 	"github.com/baeroe/skilltri/internal/downstream"
@@ -101,7 +103,7 @@ func TestWhichOfflineBrokenConfig(t *testing.T) {
 func TestRenderStatus(t *testing.T) {
 	var out bytes.Buffer
 	renderStatus(&out, daemon.StatusReply{
-		PID: 42, Version: "0.1.0", ConfigError: "parse config.json: bad",
+		PID: 42, Version: "0.1.0", Path: "/opt/demo/bin:/usr/bin", ConfigError: "parse config.json: bad",
 		Servers: []downstream.ServerStatus{
 			{Name: "docs", State: "ready", Tools: 7, Sessions: 2},
 			{Name: "mail", State: "error", Error: "exec: not found"},
@@ -109,7 +111,7 @@ func TestRenderStatus(t *testing.T) {
 		Sessions: []gateway.SessionInfo{{Dir: "/work/demo", ClientName: "claude-code"}},
 	})
 	s := out.String()
-	for _, want := range []string{"running (pid 42, version 0.1.0)", "config error: parse config.json: bad", "docs", "ready", "exec: not found", "/work/demo", "claude-code"} {
+	for _, want := range []string{"running (pid 42, version 0.1.0)", "path: /opt/demo/bin:/usr/bin", "config error: parse config.json: bad", "docs", "ready", "exec: not found", "/work/demo", "claude-code"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("output lacks %q:\n%s", want, s)
 		}
@@ -130,5 +132,53 @@ func TestRenderWhich(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Errorf("output lacks %q:\n%s", want, s)
 		}
+	}
+}
+
+func TestStopOffline(t *testing.T) {
+	offline(t, "")
+	var out bytes.Buffer
+	if code := Stop(&out); code != 0 {
+		t.Errorf("exit = %d, want 0", code)
+	}
+	if !strings.Contains(out.String(), "daemon not running") {
+		t.Errorf("output = %q", out.String())
+	}
+}
+
+func TestStopRunning(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "stc") // macOS limits socket paths to 104 bytes
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "d.sock")
+	t.Setenv("SKILLTRI_SOCKET", sock)
+	d := daemon.New(daemon.Options{ConfigPath: filepath.Join(dir, "config.json"), SocketPath: sock, LockPath: filepath.Join(dir, "d.lock")})
+	done := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { done <- d.Run(ctx) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for daemon.Control(sock, daemon.Hello{Cmd: "status"}, nil) != nil {
+		if time.Now().After(deadline) {
+			t.Fatal("daemon not reachable")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	var out bytes.Buffer
+	if code := Stop(&out); code != 0 {
+		t.Fatalf("exit = %d, output %q", code, out.String())
+	}
+	if !strings.Contains(out.String(), "daemon stopped") {
+		t.Errorf("output = %q", out.String())
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("daemon still running after stop")
 	}
 }
