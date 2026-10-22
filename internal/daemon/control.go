@@ -84,18 +84,27 @@ type controlResponse struct {
 // Control sends a control hello to the daemon at socket and decodes the result into reply.
 // V and Kind default to 1 and "control".
 func Control(socket string, h Hello, reply any) error {
+	return control(socket, h, reply, 2*time.Second, timeoutFor(h.Cmd))
+}
+
+// ControlTimeout is Control with timeout bounding both the dial and the whole request.
+func ControlTimeout(socket string, h Hello, reply any, timeout time.Duration) error {
+	return control(socket, h, reply, timeout, timeout)
+}
+
+func control(socket string, h Hello, reply any, dial, total time.Duration) error {
 	if h.V == 0 {
 		h.V = helloVersion
 	}
 	if h.Kind == "" {
 		h.Kind = "control"
 	}
-	conn, err := net.DialTimeout("unix", socket, 2*time.Second)
+	conn, err := net.DialTimeout("unix", socket, dial)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(timeoutFor(h.Cmd)))
+	_ = conn.SetDeadline(time.Now().Add(total))
 	b, err := json.Marshal(h)
 	if err != nil {
 		return err

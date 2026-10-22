@@ -44,6 +44,7 @@ Usage:
   skilltri daemon install   install and start the daemon as a login service
   skilltri daemon uninstall stop and remove the login service
   skilltri status [--json]  show daemon, servers and config errors
+  skilltri doctor [--json]  check config, daemon, sources, skills and harness setup (read-only)
   skilltri which [dir] [--json]
                             show which servers and tools a session in dir gets
   skilltri update [source...] [--json]
@@ -111,6 +112,8 @@ func run(args []string) int {
 		return runMCP(args[1:])
 	case "status":
 		return runStatus(args[1:])
+	case "doctor":
+		return runDoctor(args[1:])
 	case "which":
 		return runWhich(args[1:])
 	case "update":
@@ -367,6 +370,16 @@ func runStatus(args []string) int {
 		return 2
 	}
 	return cli.Status(os.Stdout, len(args) == 1)
+}
+
+// runDoctor implements `skilltri doctor [--json]`.
+func runDoctor(args []string) int {
+	if len(args) > 1 || (len(args) == 1 && args[0] != "--json") {
+		fmt.Fprint(os.Stderr, "usage: skilltri doctor [--json]\n")
+		return 2
+	}
+	gateway.Version = version // the daemon's version is compared with this binary's
+	return cli.Doctor(os.Stdout, len(args) == 1)
 }
 
 // runWhich implements `skilltri which [dir] [--json]`; dir defaults to the working directory.

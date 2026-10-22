@@ -132,6 +132,26 @@ func SyncProjectDir(sessionDir, rel string, active []catalog.Entry) (SyncResult,
 	return res, errors.Join(errs...)
 }
 
+// OwnedLinks returns the links skilltri owns in sessionDir/rel (name → link target): manifest
+// entries that are still symlinks to their recorded target (legacy entries: any symlink). It only
+// reads; a missing folder or manifest owns nothing.
+func OwnedLinks(sessionDir, rel string) (map[string]string, error) {
+	target := filepath.Join(sessionDir, filepath.Clean(filepath.FromSlash(rel)))
+	owned, err := readManifest(filepath.Join(target, manifestFile))
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for name, recorded := range owned {
+		cur, err := os.Readlink(filepath.Join(target, name))
+		if err != nil || (recorded != "" && cur != recorded) {
+			continue
+		}
+		out[name] = cur
+	}
+	return out, nil
+}
+
 func sortedKeys[V any](m map[string]V) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
