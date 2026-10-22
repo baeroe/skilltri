@@ -30,7 +30,11 @@ func tmpDir(t *testing.T) string {
 }
 
 // startDaemonLater returns a start func that runs an in-process daemon after delay, stopped at test end.
+// skilltri's own dirs go below dir, so the daemon never touches the real ones.
 func startDaemonLater(t *testing.T, dir string, delay time.Duration, calls *atomic.Int32) func() error {
+	for _, env := range []string{"SKILLTRI_CONFIG_DIR", "SKILLTRI_STATE_DIR", "SKILLTRI_DATA_DIR", "SKILLTRI_CACHE_DIR"} {
+		t.Setenv(env, filepath.Join(dir, env))
+	}
 	return func() error {
 		calls.Add(1)
 		ctx, cancel := context.WithCancel(context.Background())

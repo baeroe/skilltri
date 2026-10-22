@@ -175,6 +175,38 @@ func TestComputeClaude(t *testing.T) {
 	}
 }
 
+func TestComputeRebuildsStaleCatalog(t *testing.T) {
+	f := newFixture(t)
+	if got := viewSkills(t, Compute(f.q, nil).Set[PluginDirsVar]); !reflect.DeepEqual(got, []string{"alpha"}) {
+		t.Fatalf("Q skills = %v", got)
+	}
+	// A config edit (here: a new source) after the catalog was saved makes the cache stale.
+	more := filepath.Join(f.home, "more")
+	skill(t, more, "gamma")
+	cfgPath := filepath.Join(f.home, ".config/skilltri/config.json")
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Sources["more"] = &config.Source{Type: "local", Path: more}
+	writeJSON(t, cfgPath, cfg)
+	old := time.Now().Add(-time.Minute)
+	if err := os.Chtimes(catalog.Path(), old, old); err != nil {
+		t.Fatal(err)
+	}
+	if got := viewSkills(t, Compute(f.q, nil).Set[PluginDirsVar]); !reflect.DeepEqual(got, []string{"alpha", "gamma"}) {
+		t.Fatalf("Q skills after the config change = %v", got)
+	}
+	c, err := catalog.Load(catalog.Path())
+	if err != nil || len(c.Skills) != 3 {
+		t.Fatalf("rebuilt catalog not saved: %v, %+v", err, c)
+	}
+	Compute(f.q, nil) // the catalog is now newer than the config: reused, not rebuilt
+	if again, err := catalog.Load(catalog.Path()); err != nil || !again.Built.Equal(c.Built) {
+		t.Fatalf("fresh catalog rebuilt: %v", err)
+	}
+}
+
 func TestComputeKeepsUserBase(t *testing.T) {
 	f := newFixture(t)
 	env := []string{PluginDirsVar + "=/mine"}

@@ -135,11 +135,14 @@ func compute(dir string) (dirs, native, notes []string) {
 	return dirs, native, notes
 }
 
-// loadCatalog returns the cached catalog, or builds one from the existing checkouts (never
+// loadCatalog returns the cached catalog unless config.json is newer (an edit the daemon has not
+// rebuilt yet, or no daemon at all); otherwise it builds one from the existing checkouts (never
 // fetching) and saves it. A failed save only costs the next call a rebuild.
 func loadCatalog(cfg *config.Config) (*catalog.Catalog, error) {
-	if c, err := catalog.Load(catalog.Path()); err == nil {
-		return c, nil
+	if fresh(catalog.Path(), paths.ConfigFile()) {
+		if c, err := catalog.Load(catalog.Path()); err == nil {
+			return c, nil
+		}
 	}
 	b := &catalog.Builder{Fetcher: &sources.Fetcher{Root: filepath.Join(paths.DataDir(), "sources")}}
 	c, err := b.Build(context.Background(), cfg, false)
@@ -148,6 +151,17 @@ func loadCatalog(cfg *config.Config) (*catalog.Catalog, error) {
 	}
 	_ = catalog.Save(catalog.Path(), c)
 	return c, nil
+}
+
+// fresh reports whether the catalog file exists and is not older than the config file (a missing
+// config counts as old).
+func fresh(catalogPath, configPath string) bool {
+	cat, err := os.Stat(catalogPath)
+	if err != nil {
+		return false
+	}
+	cfg, err := os.Stat(configPath)
+	return err != nil || !cfg.ModTime().After(cat.ModTime())
 }
 
 // parse turns KEY=value entries into a map; later entries win.

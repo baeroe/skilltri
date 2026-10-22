@@ -44,6 +44,8 @@ const poll = 50 * time.Millisecond
 type env struct {
 	dir, cfg, sock, lock string
 	connectRefresh       time.Duration
+	tick                 time.Duration // Options.UpdateTick
+	d                    **Daemon      // set by start
 }
 
 func newEnv(t *testing.T) env {
@@ -53,11 +55,26 @@ func newEnv(t *testing.T) env {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
-	return env{dir: dir, cfg: filepath.Join(dir, "config.json"), sock: filepath.Join(dir, "d.sock"), lock: filepath.Join(dir, "d.lock")}
+	isolateDirs(t, dir)
+	return env{dir: dir, cfg: filepath.Join(dir, "config.json"), sock: filepath.Join(dir, "d.sock"), lock: filepath.Join(dir, "d.lock"), d: new(*Daemon)}
+}
+
+// isolateDirs points skilltri's config, state, data and cache dirs below dir, so the daemon's
+// catalog, checkouts and views never reach the real ones.
+func isolateDirs(t *testing.T, dir string) {
+	t.Helper()
+	for env, sub := range map[string]string{
+		"SKILLTRI_CONFIG_DIR": "config",
+		"SKILLTRI_STATE_DIR":  "state",
+		"SKILLTRI_DATA_DIR":   "data",
+		"SKILLTRI_CACHE_DIR":  "cache",
+	} {
+		t.Setenv(env, filepath.Join(dir, sub))
+	}
 }
 
 func (e env) options() Options {
-	return Options{ConfigPath: e.cfg, SocketPath: e.sock, LockPath: e.lock, Version: "test", PollInterval: poll, ConnectRefresh: e.connectRefresh}
+	return Options{ConfigPath: e.cfg, SocketPath: e.sock, LockPath: e.lock, Version: "test", PollInterval: poll, ConnectRefresh: e.connectRefresh, UpdateTick: e.tick}
 }
 
 // writeConfig writes c as the config file and makes sure its mtime moves forward.
@@ -90,7 +107,9 @@ func (e env) start(t *testing.T) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- New(e.options()).Run(ctx) }()
+	d := New(e.options())
+	*e.d = d
+	go func() { done <- d.Run(ctx) }()
 	t.Cleanup(func() {
 		cancel()
 		select {
@@ -557,7 +576,9 @@ func TestShutdownWithPendingHello(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- New(e.options()).Run(ctx) }()
+	d := New(e.options())
+	*e.d = d
+	go func() { done <- d.Run(ctx) }()
 	eventually(t, 5*time.Second, "daemon up", func() bool {
 		return Control(e.sock, Hello{Cmd: "status"}, nil) == nil
 	})

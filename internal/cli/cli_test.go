@@ -154,6 +154,9 @@ func TestStopRunning(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	sock := filepath.Join(dir, "d.sock")
 	t.Setenv("SKILLTRI_SOCKET", sock)
+	for _, env := range []string{"SKILLTRI_CONFIG_DIR", "SKILLTRI_STATE_DIR", "SKILLTRI_DATA_DIR", "SKILLTRI_CACHE_DIR"} {
+		t.Setenv(env, filepath.Join(dir, env)) // the daemon's catalog and views stay in the temp dir
+	}
 	d := daemon.New(daemon.Options{ConfigPath: filepath.Join(dir, "config.json"), SocketPath: sock, LockPath: filepath.Join(dir, "d.lock")})
 	done := make(chan error, 1)
 	ctx, cancel := context.WithCancel(context.Background())

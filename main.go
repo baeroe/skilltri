@@ -44,6 +44,8 @@ Usage:
   skilltri status [--json]  show daemon, servers and config errors
   skilltri which [dir] [--json]
                             show which servers and tools a session in dir gets
+  skilltri update [source...] [--json]
+                            update skill sources now (all when none is named)
   skilltri import 1mcp [file] [--force]
                             import servers from a 1MCP mcp.json
   skilltri env [dir] [--shell zsh|bash|fish]
@@ -85,6 +87,8 @@ func run(args []string) int {
 		return runStatus(args[1:])
 	case "which":
 		return runWhich(args[1:])
+	case "update":
+		return runUpdate(args[1:])
 	case "import":
 		return runImport(args[1:])
 	case "secret":
@@ -303,6 +307,23 @@ func runWhich(args []string) int {
 		}
 	}
 	return cli.Which(os.Stdout, dir, jsonOut)
+}
+
+// runUpdate implements `skilltri update [source...] [--json]`.
+func runUpdate(args []string) int {
+	jsonOut, names := false, []string{}
+	for _, a := range args {
+		switch {
+		case a == "--json":
+			jsonOut = true
+		case !strings.HasPrefix(a, "-"):
+			names = append(names, a)
+		default:
+			fmt.Fprint(os.Stderr, "usage: skilltri update [source...] [--json]\n")
+			return 2
+		}
+	}
+	return cli.Update(os.Stdout, names, jsonOut)
 }
 
 // runService installs or uninstalls the login service for the running binary.

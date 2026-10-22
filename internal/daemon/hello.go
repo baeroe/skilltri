@@ -20,7 +20,7 @@ type Hello struct {
 	Kind        string   `json:"kind"`                  // "session" | "control"
 	Dir         string   `json:"dir,omitempty"`         // session folder
 	DirExplicit bool     `json:"dirExplicit,omitempty"` // from --cwd/SKILLTRI_CWD: roots never override it
-	Cmd         string   `json:"cmd,omitempty"`         // control: "status" | "which" | "shutdown"
+	Cmd         string   `json:"cmd,omitempty"`         // control: "status" | "which" | "update" | "shutdown"
 	Args        []string `json:"args,omitempty"`
 }
 

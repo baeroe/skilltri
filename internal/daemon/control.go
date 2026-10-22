@@ -17,8 +17,15 @@ import (
 	"github.com/baeroe/skilltri/internal/rules"
 )
 
-// controlTimeout bounds one control request, client and daemon side.
+// controlTimeout bounds one control request, client and daemon side; "update" gets updateTimeout.
 const controlTimeout = 30 * time.Second
+
+func timeoutFor(cmd string) time.Duration {
+	if cmd == "update" {
+		return updateTimeout
+	}
+	return controlTimeout
+}
 
 // StatusReply answers the "status" control command.
 type StatusReply struct {
@@ -71,7 +78,7 @@ func Control(socket string, h Hello, reply any) error {
 		return err
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(controlTimeout))
+	_ = conn.SetDeadline(time.Now().Add(timeoutFor(h.Cmd)))
 	b, err := json.Marshal(h)
 	if err != nil {
 		return err
@@ -99,7 +106,7 @@ func Control(socket string, h Hello, reply any) error {
 // control answers one control request (or reports a bad hello) and closes the connection.
 func (d *Daemon) control(conn net.Conn, h Hello, herr error) {
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(controlTimeout))
+	_ = conn.SetDeadline(time.Now().Add(timeoutFor(h.Cmd)))
 	var (
 		result any
 		err    = herr
@@ -110,6 +117,8 @@ func (d *Daemon) control(conn net.Conn, h Hello, herr error) {
 			result = d.status()
 		case "which":
 			result, err = d.which(h)
+		case "update":
+			result, err = d.update(h.Args)
 		case "shutdown":
 			defer d.cancel() // after the reply is written; Run then stops like on SIGTERM
 			d.log.Printf("shutdown requested")

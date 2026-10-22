@@ -1,6 +1,7 @@
-// Package daemon is skilltri's background process: it owns the downstream connections and serves
-// harness sessions and control requests on a Unix socket. Every connection starts with a one-line
-// JSON hello that says which of the two it is; a flock on a lock file guarantees one daemon.
+// Package daemon is skilltri's background process: it owns the downstream connections and the skill
+// catalog (keeping skill sources up to date), and serves harness sessions and control requests on a
+// Unix socket. Every connection starts with a one-line JSON hello that says which of the two it is;
+// a flock on a lock file guarantees one daemon.
 package daemon
 
 import (
@@ -19,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/baeroe/skilltri/internal/catalog"
 	"github.com/baeroe/skilltri/internal/config"
 	"github.com/baeroe/skilltri/internal/downstream"
 	"github.com/baeroe/skilltri/internal/gateway"
@@ -46,10 +48,12 @@ const (
 type Options struct {
 	ConfigPath, SocketPath, LockPath string
 	Version                          string
-	Logger                           *log.Logger   // nil: discard
-	PollInterval                     time.Duration // config file check; 0 → 1s
-	RetryInterval                    time.Duration // re-Refresh of all sessions so failed servers reappear; 0 → 30s
-	ConnectRefresh                   time.Duration // bound of the Refresh before initialize; 0 → 3s
+	Logger                           *log.Logger      // nil: discard
+	PollInterval                     time.Duration    // config file check; 0 → 1s
+	RetryInterval                    time.Duration    // re-Refresh of all sessions so failed servers reappear; 0 → 30s
+	ConnectRefresh                   time.Duration    // bound of the Refresh before initialize; 0 → 3s
+	Builder                          *catalog.Builder // builds the skill catalog; nil → DefaultBuilder()
+	UpdateTick                       time.Duration    // check for due skill source updates; 0 → 1 min
 	// Wait makes Run wait for the lock instead of returning ErrAlreadyRunning (`daemon --wait`,
 	// used by the login service, so it takes over when a shim-started daemon exits).
 	Wait bool
@@ -57,12 +61,18 @@ type Options struct {
 
 // Daemon serves sessions and control requests. Create it with New and start it with Run.
 type Daemon struct {
-	o      Options
-	log    *log.Logger
-	cfg    atomic.Pointer[config.Config] // never nil once Run started
-	mgr    *downstream.Manager
-	ctx    context.Context // Run's context; cancelled on shutdown
-	cancel context.CancelFunc
+	o   Options
+	log *log.Logger
+	cfg atomic.Pointer[config.Config] // never nil once Run started
+	mgr *downstream.Manager
+	cat atomic.Pointer[catalog.Catalog] // set before Run serves; see Catalog
+	// haveConfig is false while only the empty fallback config (broken file at start) is loaded;
+	// the catalog is then neither built nor saved, so a good cached one survives.
+	haveConfig atomic.Bool
+	updMu      sync.Mutex      // serializes source syncs and catalog builds
+	rebuildCh  chan struct{}   // buffered 1: the config changed, rebuild the catalog
+	ctx        context.Context // Run's context; cancelled on shutdown
+	cancel     context.CancelFunc
 
 	mu        sync.Mutex
 	configErr string
@@ -91,11 +101,17 @@ func New(o Options) *Daemon {
 	if o.RetryInterval <= 0 {
 		o.RetryInterval = defaultRetryInterval
 	}
+	if o.UpdateTick <= 0 {
+		o.UpdateTick = defaultUpdateTick
+	}
+	if o.Builder == nil {
+		o.Builder = DefaultBuilder()
+	}
 	l := o.Logger
 	if l == nil {
 		l = log.New(io.Discard, "", 0)
 	}
-	return &Daemon{o: o, log: l, sessions: map[string]*session{}}
+	return &Daemon{o: o, log: l, sessions: map[string]*session{}, rebuildCh: make(chan struct{}, 1)}
 }
 
 // Run takes the lock, listens on the socket and serves until ctx is cancelled or a shutdown
@@ -126,6 +142,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.log.Printf("config: %v (starting with no servers)", err)
 		d.configErr = err.Error()
 		c = &config.Config{Version: 1, Servers: map[string]*config.Server{}}
+	} else {
+		d.haveConfig.Store(true)
 	}
 	d.cfg.Store(c)
 	idle := time.Duration(c.Settings.IdleTimeoutSec) * time.Second
@@ -161,8 +179,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	d.ctx, d.cancel = ctx, cancel
+	d.initCatalog(ctx)
 	var loops sync.WaitGroup
-	loops.Add(3)
+	loops.Add(4)
+	go func() { defer loops.Done(); d.updater(ctx) }()
 	go func() { defer loops.Done(); d.watch(ctx, sig) }()
 	go func() { defer loops.Done(); d.retry(ctx) }()
 	go func() { defer loops.Done(); d.accept(ln) }()

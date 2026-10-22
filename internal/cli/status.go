@@ -1,6 +1,7 @@
-// Package cli implements the commands that talk to the daemon: `status`, `which` and `daemon stop`.
-// Both ask the running daemon over the control socket; `which` falls back to the config file
-// when none runs, so folder rules can be checked before the daemon is up.
+// Package cli implements the commands that talk to the daemon: `status`, `which`, `update` and
+// `daemon stop`. They ask the running daemon over the control socket; `which` falls back to the
+// config file when none runs, so folder rules can be checked before the daemon is up, and `update`
+// then syncs the sources itself.
 package cli
 
 import (
