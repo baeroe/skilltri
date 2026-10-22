@@ -31,6 +31,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"strconv"
@@ -81,6 +82,8 @@ type Options struct {
 	Now     func() time.Time                      // default time.Now
 	Control func(h daemon.Hello, reply any) error // default daemon.ControlTimeout with 2 s
 	Editor  func(path string) *exec.Cmd           // default $VISUAL/$EDITOR/vi
+	// Clipboard copies text to the system clipboard (default pbcopy / wl-copy / xclip).
+	Clipboard func(text string) error
 	// Update syncs the skill sources names (all enabled ones when empty): through the daemon's
 	// "update" when viaDaemon (falling back to offline when it does not listen), else offline,
 	// saving the catalog. It returns when ctx is done. Default Options.updateSources.
@@ -254,6 +257,9 @@ func New(o Options) *Model {
 	if o.Editor == nil {
 		o.Editor = defaultEditor
 	}
+	if o.Clipboard == nil {
+		o.Clipboard = copyToClipboard
+	}
 	if o.Update == nil {
 		o.Update = o.updateSources
 	}
@@ -266,6 +272,7 @@ func New(o Options) *Model {
 	}
 	m.tabs[TabServers] = newServersTab()
 	m.tabs[TabSkills] = newSkillsTab()
+	m.tabs[TabPreview] = newPreviewTab(o.Cwd, o.Home)
 	return m
 }
 
@@ -641,8 +648,6 @@ func (p *placeholderTab) view(m *Model, w, h int) string {
 				lines = append(lines, oneLine(e.ID))
 			}
 		}
-	case TabPreview:
-		lines = append(lines, kv("folder", ellipsizeMiddle(tildify(san(m.opts.Cwd), m.opts.Home), max(iw-8, 1)), 8))
 	case TabSetup:
 		lines = append(lines,
 			kv("binary", ellipsizeMiddle(tildify(san(m.opts.Bin), m.opts.Home), max(iw-8, 1)), 8),
@@ -663,4 +668,17 @@ func (p *placeholderTab) view(m *Model, w, h int) string {
 		return hjoin(panel(p.title(), lines, lw, h, true, ""), panel("Details", soon, w-lw, h, false, ""))
 	}
 	return panel(p.title(), append(lines, "", soon[0]), w, h, true, "")
+}
+
+// copyToClipboard pipes text into the first clipboard tool found.
+func copyToClipboard(text string) error {
+	for _, c := range [][]string{{"pbcopy"}, {"wl-copy"}, {"xclip", "-selection", "clipboard"}} {
+		if _, err := exec.LookPath(c[0]); err != nil {
+			continue
+		}
+		cmd := exec.Command(c[0], c[1:]...)
+		cmd.Stdin = strings.NewReader(text)
+		return cmd.Run()
+	}
+	return errors.New("no clipboard tool (pbcopy, wl-copy or xclip)")
 }

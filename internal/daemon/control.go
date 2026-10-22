@@ -60,6 +60,20 @@ func WhichSkills(c *catalog.Catalog, cfg *config.Config, dir string) []WhichSkil
 	return out
 }
 
+// WhichOffline decides every server and skill for dir (already normalized) from the config and
+// catalog alone, as `skilltri which` does without a daemon: servers have the state "unknown" and
+// no tools. cat may be nil (no skills).
+func WhichOffline(cfg *config.Config, cat *catalog.Catalog, dir string) WhichReply {
+	reply := WhichReply{Dir: dir}
+	for _, sd := range gateway.Servers(cfg, dir) {
+		reply.Servers = append(reply.Servers, WhichServer{Name: sd.Name, Decision: sd.Decision, State: "unknown"})
+	}
+	if cat != nil {
+		reply.Skills = WhichSkills(cat, cfg, dir)
+	}
+	return reply
+}
+
 // WhichServer is one configured server's decision for the folder.
 type WhichServer struct {
 	Name     string

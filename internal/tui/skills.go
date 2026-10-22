@@ -115,6 +115,34 @@ func (t *skillsTab) selected(m *Model) *treeRow {
 	return &rows[t.idx]
 }
 
+// selectSkill selects the skill id of source (plugin: the marketplace entry, "" for none) and
+// opens the nodes above it; false when the tree has no such skill.
+func (t *skillsTab) selectSkill(m *Model, source, plugin, id string) bool {
+	key := skillKey(source, id)
+	var found bool
+	var walk func(ns []*treeNode)
+	walk = func(ns []*treeNode) {
+		for _, n := range ns {
+			found = found || n.key == key
+			walk(n.children)
+		}
+	}
+	walk(buildTree(m.snap))
+	if !found {
+		return false
+	}
+	t.query, t.filtering = "", false
+	t.filter.SetValue("")
+	t.filter.Blur()
+	t.open[srcKey(source)] = true
+	if plugin != "" {
+		t.open[pluginKey(source, plugin)] = true
+	}
+	t.sel = key
+	t.resolve(m)
+	return true
+}
+
 // --- update --------------------------------------------------------------------------------
 
 func (t *skillsTab) update(m *Model, msg tea.Msg) tea.Cmd {

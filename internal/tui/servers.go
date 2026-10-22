@@ -101,6 +101,20 @@ func (t *serversTab) resolve(m *Model) []string {
 	return rows
 }
 
+// selectServer selects the server name (dropping a filter that hides it); false when the config
+// has no such server.
+func (t *serversTab) selectServer(m *Model, name string) bool {
+	if m.snap.Config == nil || m.snap.Config.Servers[name] == nil {
+		return false
+	}
+	t.query, t.filtering = "", false
+	t.filter.SetValue("")
+	t.filter.Blur()
+	t.sel, t.toolFocus = name, false
+	t.resolve(m)
+	return true
+}
+
 // server is the selected server's config (nil when none).
 func (t *serversTab) server(m *Model) *config.Server {
 	if m.snap.Config == nil || t.sel == "" {
