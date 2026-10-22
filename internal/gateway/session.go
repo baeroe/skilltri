@@ -117,8 +117,8 @@ func (s *Session) SetDir(ctx context.Context, dir string) {
 	}
 }
 
-// Close releases every server the session acquired. The mcp.Server keeps its last lists, but
-// calls fail from now on.
+// Close releases every server the session acquired and stops its perSession instances at once.
+// The mcp.Server keeps its last lists, but calls fail from now on.
 func (s *Session) Close() {
 	s.cancel()
 	s.refreshMu.Lock()
@@ -129,9 +129,7 @@ func (s *Session) Close() {
 		return
 	}
 	s.closed = true
-	for name := range s.active {
-		s.mgr.Release(name, s.id)
-	}
+	s.mgr.ReleaseSession(s.id)
 	s.active = map[string]bool{}
 }
 
@@ -401,11 +399,11 @@ func defKey(v any) string {
 
 // conn acquires server for a proxied request. It fails when the server is no longer active for
 // the session; a claim taken while a Refresh dropped the server is released again.
-func (s *Session) conn(ctx context.Context, server string) (*downstream.Conn, error) {
+func (s *Session) conn(ctx context.Context, server string, opts ...downstream.AcquireOption) (*downstream.Conn, error) {
 	if !s.UsesServer(server) {
 		return nil, fmt.Errorf("%s: server is not active for this session", server)
 	}
-	c, err := s.mgr.Acquire(ctx, server, s.id)
+	c, err := s.mgr.Acquire(ctx, server, s.id, opts...)
 	s.mu.Lock()
 	if !s.active[server] {
 		s.mgr.Release(server, s.id)
@@ -417,15 +415,16 @@ func (s *Session) conn(ctx context.Context, server string) (*downstream.Conn, er
 	return c, err
 }
 
-// toolHandler forwards a call with its raw arguments. Failures become error results naming the
-// server, so a dead downstream never breaks the harness session.
+// toolHandler forwards a call with its raw arguments. A tool call is explicit, so it starts a
+// failed server even during its start backoff. Failures become error results naming the server,
+// so a dead downstream never breaks the harness session.
 func (s *Session) toolHandler(rt route) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var args json.RawMessage
 		if req.Params != nil {
 			args = req.Params.Arguments
 		}
-		c, err := s.conn(ctx, rt.server)
+		c, err := s.conn(ctx, rt.server, downstream.BypassBackoff())
 		if err == nil {
 			var res *mcp.CallToolResult
 			if res, err = c.CallTool(ctx, rt.name, args); err == nil {

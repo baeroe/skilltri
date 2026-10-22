@@ -25,12 +25,14 @@ const defaultRequestTimeout = 60 * time.Second
 type Conn struct {
 	server   string
 	cs       *mcp.ClientSession
-	stderr   *ring // nil for http
-	timeout  time.Duration
-	lastCall *atomic.Int64   // unix nanos, shared with the server's entry
-	dead     chan struct{}   // closed when the session ended
-	ctx      context.Context // cancelled by close, which aborts in-flight calls
+	stderr   *ring                // nil for http
+	timeout  func() time.Duration // request timeout, read per call from the current config
+	lastCall *atomic.Int64        // unix nanos, shared with the server's entry
+	dead     chan struct{}        // closed when the session ended
+	ctx      context.Context      // cancelled by close, which aborts in-flight calls
 	cancel   context.CancelFunc
+	// From the initialize result: servers without the capability are not asked for the list.
+	hasPrompts, hasResources bool
 
 	mu        sync.Mutex
 	gen       uint64 // bumped on every invalidation, so a fetch racing a list_changed is not cached
@@ -39,14 +41,11 @@ type Conn struct {
 	resources []*mcp.Resource
 }
 
-// dial starts or connects to the server described by cfg. onChanged runs after a list_changed
-// notification invalidated the conn's caches.
-func dial(ctx context.Context, name string, cfg *config.Server, expand func(string) (string, error), lastCall *atomic.Int64, onChanged func()) (*Conn, error) {
-	c := &Conn{server: name, timeout: defaultRequestTimeout, lastCall: lastCall, dead: make(chan struct{})}
+// dial starts or connects to the server described by cfg. timeout gives the request timeout for
+// each call. onChanged runs after a list_changed notification invalidated the conn's caches.
+func dial(ctx context.Context, name string, cfg *config.Server, expand func(string) (string, error), timeout func() time.Duration, lastCall *atomic.Int64, onChanged func()) (*Conn, error) {
+	c := &Conn{server: name, timeout: timeout, lastCall: lastCall, dead: make(chan struct{})}
 	c.ctx, c.cancel = context.WithCancel(context.Background())
-	if cfg.RequestTimeoutMs > 0 {
-		c.timeout = time.Duration(cfg.RequestTimeoutMs) * time.Millisecond
-	}
 	invalidate := func() {
 		c.mu.Lock()
 		c.gen++
@@ -99,6 +98,12 @@ func dial(ctx context.Context, name string, cfg *config.Server, expand func(stri
 		return c, err // c carries the stderr tail
 	}
 	c.cs = cs
+	c.hasPrompts, c.hasResources = true, true
+	if ir := cs.InitializeResult(); ir != nil {
+		caps := ir.Capabilities
+		c.hasPrompts = caps != nil && caps.Prompts != nil
+		c.hasResources = caps != nil && caps.Resources != nil
+	}
 	return c, nil
 }
 
@@ -152,7 +157,8 @@ func (c *Conn) do(ctx context.Context, what string, fn func(ctx context.Context)
 	if c.isDead() || c.ctx.Err() != nil {
 		return fmt.Errorf("%s: %s: connection closed", c.server, what)
 	}
-	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	timeout := c.timeout()
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	defer context.AfterFunc(c.ctx, cancel)()
 	err := fn(ctx)
@@ -162,7 +168,7 @@ func (c *Conn) do(ctx context.Context, what string, fn func(ctx context.Context)
 	case c.ctx.Err() != nil:
 		return fmt.Errorf("%s: %s: connection closed", c.server, what)
 	case errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded):
-		return fmt.Errorf("%s: %s: request timeout after %v", c.server, what, c.timeout)
+		return fmt.Errorf("%s: %s: request timeout after %v", c.server, what, timeout)
 	default:
 		return fmt.Errorf("%s: %s: %w", c.server, what, err)
 	}
@@ -217,15 +223,23 @@ func (c *Conn) Tools(ctx context.Context) ([]*mcp.Tool, error) {
 	})
 }
 
-// Prompts lists the server's prompts (all pages), cached until list_changed.
+// Prompts lists the server's prompts (all pages), cached until list_changed. A server without
+// the prompts capability has none.
 func (c *Conn) Prompts(ctx context.Context) ([]*mcp.Prompt, error) {
+	if !c.hasPrompts {
+		return []*mcp.Prompt{}, nil
+	}
 	return cachedList(c, ctx, "prompts/list", &c.prompts, func(ctx context.Context) ([]*mcp.Prompt, error) {
 		return collect(c.cs.Prompts(ctx, nil))
 	})
 }
 
-// Resources lists the server's resources (all pages), cached until list_changed.
+// Resources lists the server's resources (all pages), cached until list_changed. A server
+// without the resources capability has none.
 func (c *Conn) Resources(ctx context.Context) ([]*mcp.Resource, error) {
+	if !c.hasResources {
+		return []*mcp.Resource{}, nil
+	}
 	return cachedList(c, ctx, "resources/list", &c.resources, func(ctx context.Context) ([]*mcp.Resource, error) {
 		return collect(c.cs.Resources(ctx, nil))
 	})

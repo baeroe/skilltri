@@ -1,6 +1,8 @@
 // Package downstream manages skilltri's client connections to the real ("downstream") MCP servers.
 // Servers start on the first Acquire and stop after an idle timeout; one process is shared by all
-// sessions unless the server is perSession. A crashed server is replaced by the next Acquire.
+// sessions unless the server is perSession. A crashed server is replaced by the next Acquire; a
+// server that fails to start is retried only after an exponential backoff, unless an explicit
+// call asks for it.
 package downstream
 
 import (
@@ -16,8 +18,18 @@ import (
 	"github.com/baeroe/skilltri/internal/config"
 )
 
-// startTimeout bounds process start plus the MCP handshake.
-const startTimeout = 60 * time.Second
+// Start timeouts bound process start plus the MCP handshake. stdio servers get longer, since
+// mcp-remote may wait for a browser login before it answers initialize.
+const (
+	startTimeout      = 60 * time.Second
+	stdioStartTimeout = 120 * time.Second
+)
+
+// Backoff defaults: after n consecutive start failures, starts wait base·2^(n-1), at most max.
+const (
+	defaultBackoff    = 30 * time.Second
+	defaultBackoffMax = 10 * time.Minute
+)
 
 // ErrClosed is returned by Acquire after Close.
 var ErrClosed = errors.New("downstream manager closed")
@@ -28,6 +40,32 @@ type Options struct {
 	Expand        func(string) (string, error)             // secrets.Expand
 	IdleTimeout   time.Duration                            // 0: never stop idle servers
 	OnListChanged func(server string)                      // downstream tools/prompts/resources changed
+	Backoff       time.Duration                            // first start-failure backoff; 0 → 30s
+	BackoffMax    time.Duration                            // backoff cap; 0 → 10m
+}
+
+// AcquireOption changes one Acquire.
+type AcquireOption func(*acquireOpts)
+
+type acquireOpts struct{ bypassBackoff bool }
+
+// BypassBackoff makes the Acquire start a failed server even inside its backoff window. Proxied
+// tool calls use it, so a user's explicit call always gets one fresh attempt; Refreshes do not.
+func BypassBackoff() AcquireOption { return func(o *acquireOpts) { o.bypassBackoff = true } }
+
+// backoffDelay is the wait after fails consecutive start failures: base·2^(fails-1), at most max.
+func backoffDelay(base, max time.Duration, fails int) time.Duration {
+	if fails <= 0 {
+		return 0
+	}
+	d := base
+	for i := 1; i < fails; i++ {
+		if d >= max/2 {
+			return max
+		}
+		d *= 2
+	}
+	return min(d, max)
 }
 
 // ServerStatus is one server's state for `skilltri status` and the TUI.
@@ -61,6 +99,13 @@ type entry struct {
 	err      string              // last start failure or crash, cleared by a successful start
 	tail     []string            // stderr tail captured with err
 	lastCall atomic.Int64
+
+	// Consecutive start failures with the config failKey, the last one at failedAt; a
+	// successful start, Restart or a changed ConnKey ends the backoff.
+	fails    int
+	failedAt time.Time
+	failKey  string
+	failErr  error
 }
 
 // inst is one started (or starting) connection. done is closed when the start finished;
@@ -87,14 +132,25 @@ func NewManager(o Options) *Manager {
 	if o.Expand == nil {
 		o.Expand = func(s string) (string, error) { return s, nil }
 	}
+	if o.Backoff <= 0 {
+		o.Backoff = defaultBackoff
+	}
+	if o.BackoffMax <= 0 {
+		o.BackoffMax = defaultBackoffMax
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Manager{o: o, ctx: ctx, cancel: cancel, servers: map[string]*entry{}}
 }
 
 // Acquire returns a ready connection to server for sessionID, starting it on demand. Shared servers
 // return the same Conn to every session; perSession servers one Conn per session. Concurrent Acquires
-// start a single process. A dead conn or one started with an outdated config is replaced.
-func (m *Manager) Acquire(ctx context.Context, server, sessionID string) (*Conn, error) {
+// start a single process. A dead conn or one started with an outdated config is replaced. Within
+// a server's start-failure backoff it returns the last start error at once, unless BypassBackoff.
+func (m *Manager) Acquire(ctx context.Context, server, sessionID string, opts ...AcquireOption) (*Conn, error) {
+	var ao acquireOpts
+	for _, o := range opts {
+		o(&ao)
+	}
 	cfg, ok := m.o.Lookup(server)
 	if !ok {
 		return nil, fmt.Errorf("unknown server %q", server)
@@ -128,6 +184,16 @@ func (m *Manager) Acquire(ctx context.Context, server, sessionID string) (*Conn,
 		}
 		in = nil
 	}
+	if in == nil && !ao.bypassBackoff && e.fails > 0 && e.failKey == key {
+		if wait := time.Until(e.failedAt.Add(backoffDelay(m.o.Backoff, m.o.BackoffMax, e.fails))); wait > 0 {
+			err := fmt.Errorf("%w (backoff after %d failed starts, next start in %s)", e.failErr, e.fails, wait.Round(time.Second))
+			if !claimed {
+				m.release(e, sessionID, false)
+			}
+			m.mu.Unlock()
+			return nil, err
+		}
+	}
 	if in == nil {
 		in = &inst{key: key, done: make(chan struct{})}
 		e.insts[ikey] = in
@@ -149,7 +215,7 @@ func (m *Manager) Acquire(ctx context.Context, server, sessionID string) (*Conn,
 	if err != nil {
 		if !claimed { // a failed first Acquire leaves no claim behind
 			m.mu.Lock()
-			m.release(e, sessionID)
+			m.release(e, sessionID, false)
 			m.mu.Unlock()
 		}
 		return nil, err
@@ -161,8 +227,12 @@ func (m *Manager) Acquire(ctx context.Context, server, sessionID string) (*Conn,
 func (m *Manager) start(e *entry, ikey string, in *inst, cfg *config.Server) {
 	defer m.wg.Done()
 	defer close(in.done)
-	ctx, cancel := context.WithTimeout(m.ctx, startTimeout)
-	conn, err := dial(ctx, e.name, cfg, m.o.Expand, &e.lastCall, func() { m.listChanged(e.name) })
+	limit := startTimeout
+	if cfg.Type == "stdio" {
+		limit = stdioStartTimeout
+	}
+	ctx, cancel := context.WithTimeout(m.ctx, limit)
+	conn, err := dial(ctx, e.name, cfg, m.o.Expand, m.requestTimeout(e.name, cfg), &e.lastCall, func() { m.listChanged(e.name) })
 	cancel()
 
 	m.mu.Lock()
@@ -173,18 +243,40 @@ func (m *Manager) start(e *entry, ikey string, in *inst, cfg *config.Server) {
 		if current {
 			delete(e.insts, ikey)
 			e.err, e.tail = in.err.Error(), conn.stderrTail()
+			if e.failKey != in.key {
+				e.fails = 0
+			}
+			e.fails++
+			e.failedAt, e.failKey, e.failErr = time.Now(), in.key, in.err
 		}
 	case !current:
 		in.err = fmt.Errorf("%s: connection replaced while starting", e.name)
 	default:
 		in.conn = conn
 		e.err, e.tail = "", nil
+		e.fails, e.failErr = 0, nil
 		m.wg.Add(1)
 		go m.watch(e, ikey, in)
 	}
 	m.mu.Unlock()
 	if err == nil && !current {
 		conn.close()
+	}
+}
+
+// requestTimeout reads the server's requestTimeoutMs from the current config on every call, so a
+// changed timeout applies without a restart. cfg (the config the instance started with) is the
+// fallback once the server is gone from the config.
+func (m *Manager) requestTimeout(name string, cfg *config.Server) func() time.Duration {
+	return func() time.Duration {
+		cur, ok := m.o.Lookup(name)
+		if !ok || cur == nil {
+			cur = cfg
+		}
+		if cur.RequestTimeoutMs > 0 {
+			return time.Duration(cur.RequestTimeoutMs) * time.Millisecond
+		}
+		return defaultRequestTimeout
 	}
 }
 
@@ -231,15 +323,29 @@ func (m *Manager) Release(server, sessionID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if e := m.servers[server]; e != nil {
-		m.release(e, sessionID)
+		m.release(e, sessionID, false)
 	}
 }
 
-// release drops a claim. Called with mu held.
-func (m *Manager) release(e *entry, sessionID string) {
+// ReleaseSession drops every claim of an ended session. Its perSession instances stop at once,
+// since no one else can use them; shared instances nobody uses stop after the idle timeout.
+func (m *Manager) ReleaseSession(sessionID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, e := range m.servers {
+		m.release(e, sessionID, true)
+	}
+}
+
+// release drops a claim; final stops the session's perSession instance without idle timeout.
+// Called with mu held.
+func (m *Manager) release(e *entry, sessionID string, final bool) {
 	delete(e.users, sessionID)
 	if in := e.insts[sessionID]; in != nil && sessionID != "" {
-		if m.o.IdleTimeout <= 0 {
+		if final || m.o.IdleTimeout <= 0 {
+			if in.idle != nil {
+				in.idle.Stop()
+			}
 			delete(e.insts, sessionID)
 			m.stopAsync(in)
 		} else {
@@ -309,15 +415,19 @@ func (m *Manager) Restart(server string) {
 		delete(e.insts, k)
 	}
 	e.err, e.tail = "", nil
+	e.fails, e.failErr = 0, nil
 	m.mu.Unlock()
 }
 
-// Status reports every server the manager has seen, sorted by name.
+// Status reports every server the manager has seen that is still in the config, sorted by name.
 func (m *Manager) Status() []ServerStatus {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]ServerStatus, 0, len(m.servers))
 	for _, e := range m.servers {
+		if cfg, ok := m.o.Lookup(e.name); !ok || cfg == nil {
+			continue
+		}
 		s := ServerStatus{Name: e.name, State: "stopped", Sessions: len(e.users)}
 		if n := e.lastCall.Load(); n != 0 {
 			s.LastCall = time.Unix(0, n)

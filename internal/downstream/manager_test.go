@@ -511,3 +511,259 @@ func TestPerSessionStopsOnReleaseWithoutIdleTimeout(t *testing.T) {
 		t.Fatal("call on released per-session conn succeeded")
 	}
 }
+
+// failing is a stdio server that records every start in a file and exits at once.
+func failing(t *testing.T) (*config.Server, func() int) {
+	t.Helper()
+	f := filepath.Join(t.TempDir(), "starts")
+	srv := &config.Server{Type: "stdio", Command: "sh", Args: []string{"-c", `echo start >> "$STARTS"; echo "demo failure" >&2; exit 1`},
+		Env: map[string]string{"STARTS": f}}
+	return srv, func() int {
+		b, _ := os.ReadFile(f)
+		return strings.Count(string(b), "start")
+	}
+}
+
+func TestBackoffDelay(t *testing.T) {
+	for _, tc := range []struct {
+		fails int
+		want  time.Duration
+	}{
+		{0, 0}, {1, 30 * time.Second}, {2, time.Minute}, {3, 2 * time.Minute}, {4, 4 * time.Minute},
+		{5, 8 * time.Minute}, {6, 10 * time.Minute}, {40, 10 * time.Minute},
+	} {
+		if got := backoffDelay(30*time.Second, 10*time.Minute, tc.fails); got != tc.want {
+			t.Errorf("backoffDelay(%d) = %v, want %v", tc.fails, got, tc.want)
+		}
+	}
+}
+
+func TestStartBackoff(t *testing.T) {
+	srv, starts := failing(t)
+	m := newManager(t, map[string]*config.Server{"a": srv}, func(o *Options) { o.Backoff = time.Hour })
+	ctx := context.Background()
+	if _, err := m.Acquire(ctx, "a", "s1"); err == nil {
+		t.Fatal("Acquire succeeded")
+	}
+	if n := starts(); n != 1 {
+		t.Fatalf("starts = %d, want 1", n)
+	}
+	// Refresh and retry Acquires within the backoff window get the recorded error, no new process.
+	for range 3 {
+		start := time.Now()
+		_, err := m.Acquire(ctx, "a", "s1")
+		if err == nil || !strings.Contains(err.Error(), "start a") || !strings.Contains(err.Error(), "backoff") {
+			t.Fatalf("Acquire in backoff = %v", err)
+		}
+		if d := time.Since(start); d > 100*time.Millisecond {
+			t.Fatalf("Acquire in backoff took %v", d)
+		}
+	}
+	if n := starts(); n != 1 {
+		t.Fatalf("starts in backoff = %d, want 1", n)
+	}
+	if s := status(m, "a"); s.State != "error" || s.Sessions != 0 || !slices.Contains(s.StderrTail, "demo failure") {
+		t.Fatalf("status = %+v", s)
+	}
+	// An explicit call tries once more.
+	if _, err := m.Acquire(ctx, "a", "s1", BypassBackoff()); err == nil || strings.Contains(err.Error(), "backoff") {
+		t.Fatalf("bypassing Acquire = %v, want a fresh start failure", err)
+	}
+	if n := starts(); n != 2 {
+		t.Fatalf("starts after bypass = %d, want 2", n)
+	}
+	if _, err := m.Acquire(ctx, "a", "s1"); err == nil || !strings.Contains(err.Error(), "backoff") {
+		t.Fatalf("Acquire after bypass = %v", err)
+	}
+	if n := starts(); n != 2 {
+		t.Fatalf("starts = %d, want 2", n)
+	}
+}
+
+func TestBackoffGrowsAndExpires(t *testing.T) {
+	srv, starts := failing(t)
+	m := newManager(t, map[string]*config.Server{"a": srv}, func(o *Options) { o.Backoff = 200 * time.Millisecond })
+	ctx := context.Background()
+	acquire := func() { _, _ = m.Acquire(ctx, "a", "s1") }
+	acquire()
+	acquire()
+	if n := starts(); n != 1 {
+		t.Fatalf("starts = %d, want 1", n)
+	}
+	time.Sleep(300 * time.Millisecond) // past the first window (200ms)
+	acquire()
+	if n := starts(); n != 2 {
+		t.Fatalf("starts after the first window = %d, want 2", n)
+	}
+	time.Sleep(300 * time.Millisecond) // inside the second window (400ms)
+	acquire()
+	if n := starts(); n != 2 {
+		t.Fatalf("starts inside the second window = %d, want 2", n)
+	}
+	time.Sleep(200 * time.Millisecond)
+	acquire()
+	if n := starts(); n != 3 {
+		t.Fatalf("starts after the second window = %d, want 3", n)
+	}
+}
+
+func TestBackoffEndsOnConfigChangeAndRestart(t *testing.T) {
+	srv, _ := failing(t)
+	cfg := &servers{m: map[string]*config.Server{"a": srv, "b": srv}}
+	m := NewManager(Options{Lookup: cfg.lookup, Backoff: time.Hour})
+	defer m.Close()
+	ctx := context.Background()
+	for _, name := range []string{"a", "b"} {
+		if _, err := m.Acquire(ctx, name, "s1"); err == nil {
+			t.Fatalf("Acquire %s succeeded", name)
+		}
+	}
+	cfg.mu.Lock()
+	cfg.m["a"] = stdio(map[string]string{"FAKEMCP_TOOLS": "x"})
+	cfg.mu.Unlock()
+	if _, err := m.Acquire(ctx, "a", "s1"); err != nil {
+		t.Fatalf("Acquire after a config fix: %v", err)
+	}
+	m.Restart("b")
+	if _, err := m.Acquire(ctx, "b", "s1"); err == nil || strings.Contains(err.Error(), "backoff") {
+		t.Fatalf("Acquire after Restart = %v, want a fresh start failure", err)
+	}
+}
+
+func TestBackoffResetBySuccess(t *testing.T) {
+	dir := t.TempDir()
+	flag := filepath.Join(dir, "ok")
+	// Fails until the flag file exists.
+	srv := &config.Server{Type: "stdio", Command: "sh", Args: []string{"-c", `[ -e "$FLAG" ] || exit 1; exec "$FAKE"`},
+		Env: map[string]string{"FLAG": flag, "FAKE": fakeBin, "FAKEMCP_TOOLS": "x"}}
+	m := newManager(t, map[string]*config.Server{"a": srv}, func(o *Options) { o.Backoff = time.Hour })
+	ctx := context.Background()
+	if _, err := m.Acquire(ctx, "a", "s1"); err == nil {
+		t.Fatal("Acquire succeeded")
+	}
+	if err := os.WriteFile(flag, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := m.Acquire(ctx, "a", "s1", BypassBackoff())
+	if err != nil {
+		t.Fatalf("bypassing Acquire: %v", err)
+	}
+	m.Restart("a") // the next start must not be held back by the old failure
+	if _, err := c.CallTool(ctx, "x", nil); err == nil {
+		t.Fatal("call on restarted conn succeeded")
+	}
+	if _, err := m.Acquire(ctx, "a", "s1"); err != nil {
+		t.Fatalf("Acquire after a successful start: %v", err)
+	}
+}
+
+func TestReleaseSessionStopsPerSessionAtOnce(t *testing.T) {
+	per := stdio(map[string]string{"FAKEMCP_TOOLS": "x"})
+	per.PerSession = true
+	m := newManager(t, map[string]*config.Server{"per": per, "shared": stdio(map[string]string{"FAKEMCP_TOOLS": "x"})},
+		func(o *Options) { o.IdleTimeout = time.Hour })
+	ctx := context.Background()
+	pc, err := m.Acquire(ctx, "per", "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Acquire(ctx, "per", "s2"); err != nil {
+		t.Fatal(err)
+	}
+	sc, err := m.Acquire(ctx, "shared", "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.ReleaseSession("s1")
+	if _, err := pc.CallTool(ctx, "x", nil); err == nil {
+		t.Fatal("per-session conn of the ended session still works")
+	}
+	if s := status(m, "per"); s.State != "ready" || s.Sessions != 1 {
+		t.Fatalf("per status = %+v (s2's instance must stay)", s)
+	}
+	if s := status(m, "shared"); s.State != "ready" || s.Sessions != 0 {
+		t.Fatalf("shared status = %+v (the idle timer keeps it)", s)
+	}
+	if _, err := sc.CallTool(ctx, "x", nil); err != nil {
+		t.Fatalf("shared conn stopped: %v", err)
+	}
+}
+
+func TestRequestTimeoutChangeAppliesWithoutRestart(t *testing.T) {
+	srv := stdio(map[string]string{"FAKEMCP_SLOW": "slow:2000"})
+	srv.RequestTimeoutMs = 10000
+	cfg := &servers{m: map[string]*config.Server{"a": srv}}
+	m := NewManager(Options{Lookup: cfg.lookup})
+	defer m.Close()
+	c, err := m.Acquire(context.Background(), "a", "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := *srv
+	next.RequestTimeoutMs = 200
+	cfg.mu.Lock()
+	cfg.m["a"] = &next
+	cfg.mu.Unlock()
+	start := time.Now()
+	_, err = c.CallTool(context.Background(), "slow", json.RawMessage(`{}`))
+	if err == nil || !strings.Contains(err.Error(), "timeout after 200ms") {
+		t.Fatalf("err = %v, want timeout after 200ms", err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("timeout took %v", d)
+	}
+}
+
+func TestStatusDropsRemovedServers(t *testing.T) {
+	cfg := &servers{m: map[string]*config.Server{"a": stdio(map[string]string{"FAKEMCP_TOOLS": "x"}), "b": {Type: "stdio", Command: "/nonexistent"}}}
+	m := NewManager(Options{Lookup: cfg.lookup})
+	defer m.Close()
+	_, _ = m.Acquire(context.Background(), "a", "s1")
+	_, _ = m.Acquire(context.Background(), "b", "s1")
+	cfg.mu.Lock()
+	delete(cfg.m, "b")
+	cfg.mu.Unlock()
+	var names []string
+	for _, s := range m.Status() {
+		names = append(names, s.Name)
+	}
+	if !slices.Equal(names, []string{"a"}) {
+		t.Fatalf("status names = %v, want [a]", names)
+	}
+}
+
+// Servers without the prompts or resources capability are not asked for those lists.
+func TestListsFollowCapabilities(t *testing.T) {
+	fs := fakemcp.New(fakemcp.Spec{Name: "a", Tools: []string{"x"}})
+	var mu sync.Mutex
+	var methods []string
+	fs.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			mu.Lock()
+			methods = append(methods, method)
+			mu.Unlock()
+			return next(ctx, method, req)
+		}
+	})
+	ts := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return fs }, nil))
+	t.Cleanup(ts.Close) // registered before the manager, so it runs after Manager.Close
+
+	m := newManager(t, map[string]*config.Server{"a": {Type: "http", URL: ts.URL}}, nil)
+	c, err := m.Acquire(context.Background(), "a", "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ps, err := c.Prompts(context.Background())
+	if err != nil || len(ps) != 0 {
+		t.Fatalf("prompts = %v, %v", ps, err)
+	}
+	rs, err := c.Resources(context.Background())
+	if err != nil || len(rs) != 0 {
+		t.Fatalf("resources = %v, %v", rs, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if slices.Contains(methods, "prompts/list") || slices.Contains(methods, "resources/list") {
+		t.Fatalf("methods sent = %v", methods)
+	}
+}

@@ -355,3 +355,71 @@ func TestSessionRefreshDeadline(t *testing.T) {
 		t.Fatalf("tools after cancelled Refresh = %v", got)
 	}
 }
+
+func serverState(m *downstream.Manager, name string) downstream.ServerStatus {
+	for _, s := range m.Status() {
+		if s.Name == name {
+			return s
+		}
+	}
+	return downstream.ServerStatus{Name: name, State: "stopped"}
+}
+
+// A perSession instance ends with its session, not after the idle timeout.
+func TestSessionCloseStopsPerSession(t *testing.T) {
+	per := stdio(map[string]string{"FAKEMCP_NAME": "per", "FAKEMCP_TOOLS": "x"})
+	per.PerSession = true
+	cfg := &config.Config{Version: 1, Servers: map[string]*config.Server{"per": per}}
+	mgr := downstream.NewManager(downstream.Options{
+		Lookup:      func(name string) (*config.Server, bool) { s, ok := cfg.Servers[name]; return s, ok },
+		IdleTimeout: time.Hour,
+	})
+	t.Cleanup(mgr.Close)
+	sess := NewSession(SessionInfo{ID: "s1", Dir: t.TempDir()}, func() *config.Config { return cfg }, mgr)
+	if err := sess.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if s := serverState(mgr, "per"); s.State != "ready" {
+		t.Fatalf("status before Close = %+v", s)
+	}
+	sess.Close()
+	if s := serverState(mgr, "per"); s.State != "stopped" || s.Sessions != 0 {
+		t.Fatalf("status after Close = %+v", s)
+	}
+}
+
+// After a crash, every explicit tool call tries a start, Refreshes respect the backoff.
+func TestToolCallBypassesBackoff(t *testing.T) {
+	dir := t.TempDir()
+	starts, ok := filepath.Join(dir, "starts"), filepath.Join(dir, "ok")
+	// Serves once (then crashes on its second tool call), every later start fails.
+	srv := &config.Server{Type: "stdio", Command: "sh",
+		Args: []string{"-c", `echo start >> "$STARTS"; [ -e "$OK" ] && exit 1; touch "$OK"; exec "$FAKE"`},
+		Env:  map[string]string{"STARTS": starts, "OK": ok, "FAKE": fakeBin, "FAKEMCP_NAME": "a", "FAKEMCP_TOOLS": "x", "FAKEMCP_EXIT_AFTER": "1"}}
+	h := newHarness(t, &config.Config{Version: 1, Servers: map[string]*config.Server{"a": srv}}, t.TempDir())
+	count := func() int { b, _ := os.ReadFile(starts); return strings.Count(string(b), "start") }
+	h.call(t, "a_x")
+	h.call(t, "a_x") // crashes the server
+	deadline := time.Now().Add(2 * time.Second)
+	for serverState(h.mgr, "a").State != "error" {
+		if time.Now().After(deadline) {
+			t.Fatalf("crash not noticed: %+v", serverState(h.mgr, "a"))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if res := h.call(t, "a_x"); !res.IsError { // start 2 fails and opens the backoff window
+		t.Fatalf("call succeeded: %s", text(res))
+	}
+	if res := h.call(t, "a_x"); !res.IsError || strings.Contains(text(res), "backoff") {
+		t.Fatalf("call in backoff = %q, want a fresh start failure", text(res))
+	}
+	if n := count(); n != 3 {
+		t.Fatalf("starts after explicit calls = %d, want 3", n)
+	}
+	ctx := context.Background()
+	_ = h.sess.Refresh(ctx) // inside the window: no start, the server's tools are dropped
+	_ = h.sess.Refresh(ctx)
+	if n := count(); n != 3 {
+		t.Fatalf("starts after refreshes = %d, want 3", n)
+	}
+}
