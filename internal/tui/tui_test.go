@@ -36,6 +36,38 @@ type harness struct {
 	which  *daemon.WhichReply // the running fake daemon's which reply
 	hellos []daemon.Hello     // every control request
 	cmdErr map[string]error   // per control command error of the running fake daemon
+	svc    *svcFake           // the fake login service
+}
+
+// svcFake is an in-memory daemon service (Options.Service).
+type svcFake struct {
+	installed  bool
+	installs   []string // exe of every Install
+	uninstalls int
+	err        error // returned by Install and Uninstall
+}
+
+func (f *svcFake) service() Service {
+	return Service{
+		File:      func() (string, error) { return "/home/demo/Library/LaunchAgents/io.github.baeroe.skilltri.plist", nil },
+		Installed: func() bool { return f.installed },
+		Install: func(exe string) error {
+			f.installs = append(f.installs, exe)
+			if f.err != nil {
+				return f.err
+			}
+			f.installed = true
+			return nil
+		},
+		Uninstall: func() error {
+			f.uninstalls++
+			if f.err != nil {
+				return f.err
+			}
+			f.installed = false
+			return nil
+		},
+	}
 }
 
 func newHarness(t *testing.T, tab Tab) *harness {
@@ -44,7 +76,7 @@ func newHarness(t *testing.T, tab Tab) *harness {
 	for _, v := range []string{"HOME", "SKILLTRI_CONFIG_DIR", "SKILLTRI_STATE_DIR", "SKILLTRI_DATA_DIR", "SKILLTRI_CACHE_DIR"} {
 		t.Setenv(v, filepath.Join(dir, strings.ToLower(v)))
 	}
-	h := &harness{t: t, dir: dir, now: time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)}
+	h := &harness{t: t, dir: dir, now: time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC), svc: &svcFake{}}
 	env := actions.Env{
 		ConfigPath:  filepath.Join(dir, "config", "config.json"),
 		CatalogPath: filepath.Join(dir, "cache", "catalog.json"),
@@ -53,8 +85,10 @@ func newHarness(t *testing.T, tab Tab) *harness {
 	}
 	h.m = New(Options{
 		Tab: tab, Env: env, Home: filepath.Join(dir, "home"), Bin: "/opt/demo/bin/skilltri", Cwd: "/work/demo",
-		NoTick: true,
-		Now:    func() time.Time { return h.now },
+		NoTick:  true,
+		Now:     func() time.Time { return h.now },
+		Environ: []string{"SHELL=/bin/zsh"},
+		Service: h.svc.service(), // never launchctl or systemctl
 		Control: func(hello daemon.Hello, reply any) error {
 			h.calls++
 			h.hellos = append(h.hellos, hello)

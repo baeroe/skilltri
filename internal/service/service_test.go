@@ -209,3 +209,29 @@ func TestUnsupportedOS(t *testing.T) {
 		t.Fatal("expected errors")
 	}
 }
+
+func TestFileAndInstalled(t *testing.T) {
+	for _, os_ := range []string{"darwin", "linux"} {
+		_, home := fake(t, os_)
+		f, err := File()
+		if err != nil || !strings.HasPrefix(f, home) {
+			t.Fatalf("%s: File = %q, %v", os_, f, err)
+		}
+		if Installed() {
+			t.Fatalf("%s: installed before Install", os_)
+		}
+		if err := Install("/opt/bin/skilltri"); err != nil {
+			t.Fatal(err)
+		}
+		if !Installed() {
+			t.Fatalf("%s: not installed after Install", os_)
+		}
+		if err := Uninstall(); err != nil || Installed() {
+			t.Fatalf("%s: installed after Uninstall (%v)", os_, err)
+		}
+	}
+	fake(t, "plan9")
+	if _, err := File(); err == nil || Installed() {
+		t.Fatal("plan9: expected no service file")
+	}
+}

@@ -10,7 +10,8 @@
 //     its own work as its own message types and ignores types it does not know. A tab keeps its
 //     selection by key (e.g. the selected server name), not by index, and re-resolves it when it
 //     sees a snapshotMsg: reloads never reset it. The terminal size is m.width/m.height (view also
-//     gets the body size).
+//     gets the body size). A tab that implements activator is told when it becomes the active tab
+//     (also the initial one), e.g. to start work it does only once it is looked at.
 //   - Dialogs are modals on a stack (Model.openModal); only the top one gets keys. esc closes the top
 //     modal (unless it implements escOwner), q quits only when no modal is open, ctrl+c always quits.
 //     Non-key messages go to every open modal, so a form under a confirmation still gets its results.
@@ -42,6 +43,8 @@ import (
 
 	"github.com/baeroe/skilltri/internal/actions"
 	"github.com/baeroe/skilltri/internal/daemon"
+	"github.com/baeroe/skilltri/internal/doctor"
+	"github.com/baeroe/skilltri/internal/skilllock"
 )
 
 // Tab identifies a tab.
@@ -88,6 +91,15 @@ type Options struct {
 	// "update" when viaDaemon (falling back to offline when it does not listen), else offline,
 	// saving the catalog. It returns when ctx is done. Default Options.updateSources.
 	Update func(ctx context.Context, names []string, viaDaemon bool) (daemon.UpdateReply, error)
+	// Service finds, installs and removes the daemon's login service (default: the service package).
+	Service Service
+	// Doctor runs the health checks (default doctor.Run). The tab cancels ctx on esc and quit and
+	// drops a cancelled run's result; doctor.Run itself is short and read-only.
+	Doctor func(ctx context.Context, e doctor.Env) []doctor.Finding
+	// Environ is the TUI's environment (default os.Environ()): SKILLTRI_HOOK and the doctor's Environ.
+	Environ []string
+	// StatePath is the skill lock file, for the doctor (default skilllock.Path()).
+	StatePath string
 }
 
 // tabModel is one tab. update gets the keys the Model does not handle globally and every non-key
@@ -121,6 +133,9 @@ type modalHinter interface{ hints() []string }
 // closer is implemented by modals (and tabs) that own background work: closed is called when the
 // modal leaves the stack for any reason, and for every open modal and every tab on quit.
 type closer interface{ closed(m *Model) }
+
+// activator is implemented by tabs that want to know when they become the active tab.
+type activator interface{ activated(m *Model) tea.Cmd }
 
 // escOwner is implemented by modals that handle esc themselves (e.g. to leave a sub-mode first);
 // the others are closed by esc without seeing it.
@@ -263,16 +278,25 @@ func New(o Options) *Model {
 	if o.Update == nil {
 		o.Update = o.updateSources
 	}
+	o.Service = o.Service.withDefaults()
+	if o.Doctor == nil {
+		o.Doctor = doctor.Run
+	}
+	if o.Environ == nil {
+		o.Environ = os.Environ()
+	}
+	if o.StatePath == "" {
+		o.StatePath = skilllock.Path()
+	}
 	if o.Tab < 0 || o.Tab >= numTabs {
 		o.Tab = TabServers
 	}
 	m := &Model{opts: o, tab: o.Tab}
-	for t := Tab(0); t < numTabs; t++ {
-		m.tabs[t] = &placeholderTab{tab: t}
-	}
 	m.tabs[TabServers] = newServersTab()
 	m.tabs[TabSkills] = newSkillsTab()
 	m.tabs[TabPreview] = newPreviewTab(o.Cwd, o.Home)
+	m.tabs[TabSetup] = newSetupTab(o.Bin)
+	m.tabs[TabDoctor] = &doctorTab{}
 	return m
 }
 
@@ -291,10 +315,19 @@ func defaultEditor(path string) *exec.Cmd {
 
 // Init loads the first snapshot and starts the refresh ticker.
 func (m *Model) Init() tea.Cmd {
-	if m.opts.NoTick {
-		return m.reload()
+	cmds := []tea.Cmd{m.reload(), m.activate()}
+	if !m.opts.NoTick {
+		cmds = append(cmds, tick())
 	}
-	return tea.Batch(m.reload(), tick())
+	return tea.Batch(cmds...)
+}
+
+// activate tells the active tab that it became active (see activator).
+func (m *Model) activate() tea.Cmd {
+	if a, ok := m.tabs[m.tab].(activator); ok {
+		return a.activated(m)
+	}
+	return nil
 }
 
 // reload starts a full snapshot load.
@@ -352,7 +385,11 @@ func (m *Model) removeModal(md modal) {
 	}
 }
 
-func (m *Model) switchTab(t Tab) { m.tab = (t + numTabs) % numTabs }
+// switchTab makes t the active tab and returns the work its activator starts.
+func (m *Model) switchTab(t Tab) tea.Cmd {
+	m.tab = (t + numTabs) % numTabs
+	return m.activate()
+}
 
 // quit closes every modal (top first) and tells the tabs, so background work is cancelled.
 func (m *Model) quit() tea.Cmd {
@@ -470,14 +507,11 @@ func (m *Model) handleKey(k tea.KeyMsg) tea.Cmd {
 		m.openModal(&helpModal{})
 		return nil
 	case "tab":
-		m.switchTab(m.tab + 1)
-		return nil
+		return m.switchTab(m.tab + 1)
 	case "shift+tab":
-		m.switchTab(m.tab - 1)
-		return nil
+		return m.switchTab(m.tab - 1)
 	case "1", "2", "3", "4", "5":
-		m.switchTab(Tab(key[0] - '1'))
-		return nil
+		return m.switchTab(Tab(key[0] - '1'))
 	case "R":
 		return m.reload()
 	}
@@ -628,47 +662,6 @@ func (m *Model) footer(w int) string {
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }
-
-// --- placeholder tab -----------------------------------------------------------------------------
-
-// placeholderTab stands in for tabs that are not implemented yet: it lists what the snapshot has.
-type placeholderTab struct{ tab Tab }
-
-func (p *placeholderTab) title() string                  { return tabNames[p.tab] }
-func (p *placeholderTab) update(*Model, tea.Msg) tea.Cmd { return nil }
-func (p *placeholderTab) hints() []string                { return []string{"R", "reload"} }
-func (p *placeholderTab) view(m *Model, w, h int) string {
-	iw := w - 4
-	var lines []string
-	s := m.snap
-	switch p.tab {
-	case TabSkills:
-		if s.Catalog != nil {
-			for _, e := range s.Catalog.Skills {
-				lines = append(lines, oneLine(e.ID))
-			}
-		}
-	case TabSetup:
-		lines = append(lines,
-			kv("binary", ellipsizeMiddle(tildify(san(m.opts.Bin), m.opts.Home), max(iw-8, 1)), 8),
-			kv("config", ellipsizeMiddle(tildify(m.opts.configPath(), m.opts.Home), max(iw-8, 1)), 8))
-	case TabDoctor:
-		for _, wn := range s.warnings() {
-			for _, l := range wrap(wn, max(iw-2, 1)) {
-				lines = append(lines, warnStyle.Render("! ")+l)
-			}
-		}
-	}
-	if len(lines) == 0 {
-		lines = append(lines, dimStyle.Render("nothing here yet"))
-	}
-	soon := []string{dimStyle.Render("coming soon")}
-	if w >= wideMin {
-		lw := min(max(w*2/5, 30), 60)
-		return hjoin(panel(p.title(), lines, lw, h, true, ""), panel("Details", soon, w-lw, h, false, ""))
-	}
-	return panel(p.title(), append(lines, "", soon[0]), w, h, true, "")
-}
 
 // copyToClipboard pipes text into the first clipboard tool found.
 func copyToClipboard(text string) error {

@@ -235,78 +235,27 @@ func pluginScopes(raw json.RawMessage) map[string]string {
 	return scopes
 }
 
-// ApplyClaude writes the sources into the config at cfgPath, copies the user skills into skillsDir
-// (ensuring a "local" source for it) and prints what happened, the warnings and the manual steps to
-// out. Existing sources and skill folders are skipped unless force is set.
+// ApplyClaude runs ImportClaude and prints what happened, the warnings and the manual steps to out.
 func ApplyClaude(cfgPath, skillsDir string, r ClaudeResult, force bool, out io.Writer) error {
-	var warnings, lines []string
-	names := make([]string, 0, len(r.Sources))
-	for n := range r.Sources {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-
-	var steps []string
-	err := config.Update(cfgPath, func(c *config.Config) error {
-		lines, steps = nil, nil
-		warnings = append([]string(nil), r.Warnings...)
-		if c.Sources == nil {
-			c.Sources = map[string]*config.Source{}
-		}
-		for _, n := range names {
-			if c.Sources[n] != nil && !force {
-				warnings = append(warnings, fmt.Sprintf("skipped source %q: already exists (use --force to overwrite)", n))
-				continue
-			}
-			c.Sources[n] = r.Sources[n]
-			lines = append(lines, "imported source "+n)
-			for _, p := range r.Uninstall[n] {
-				steps = append(steps, p.Step())
-			}
-		}
-		if len(r.UserSkills) > 0 {
-			switch l := c.Sources["local"]; {
-			case l == nil:
-				c.Sources["local"] = &config.Source{Type: "local", Path: skillsDir}
-				lines = append(lines, "added local source local")
-			case l.Type != "local" || l.Path != skillsDir:
-				warnings = append(warnings, fmt.Sprintf("source \"local\" does not point at %s: the copied skills are in no source", skillsDir))
-			}
-		}
-		return nil
-	})
+	rep, err := ImportClaude(cfgPath, skillsDir, r, force)
 	if err != nil {
 		return err
 	}
-
-	var copied []string
-	for _, dir := range r.UserSkills {
-		name := filepath.Base(dir)
-		target := filepath.Join(skillsDir, name)
-		if _, err := os.Lstat(target); err == nil && !force {
-			warnings = append(warnings, fmt.Sprintf("skipped skill %q: already exists (use --force to overwrite)", name))
-			continue
-		}
-		if err := installTree(dir, target); err != nil {
-			return fmt.Errorf("copy skill %s: %w", name, err)
-		}
-		copied = append(copied, name)
-		steps = append(steps, "remove "+filepath.Join(r.Home, ".claude", "skills", name))
+	for _, n := range rep.Sources {
+		fmt.Fprintln(out, "imported source "+n)
 	}
-
-	for _, l := range lines {
-		fmt.Fprintln(out, l)
+	if rep.LocalAdded {
+		fmt.Fprintln(out, "added local source local")
 	}
-	for _, n := range copied {
+	for _, n := range rep.Skills {
 		fmt.Fprintln(out, "copied skill "+n)
 	}
-	for _, w := range warnings {
+	for _, w := range rep.Warnings {
 		fmt.Fprintf(out, "warning: %s\n", w)
 	}
-	steps = append(steps, r.Steps...)
-	if len(steps) > 0 {
+	if len(rep.Steps) > 0 {
 		fmt.Fprintln(out, "\nNext steps (not run by skilltri):")
-		for _, s := range steps {
+		for _, s := range rep.Steps {
 			fmt.Fprintln(out, "  - "+s)
 		}
 	}

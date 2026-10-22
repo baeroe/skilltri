@@ -122,8 +122,9 @@ func (t *previewTab) snapKey(m *Model) string {
 }
 
 // start asks for the preview of the input's folder: the daemon when it runs, else (or when it does
-// not answer) the files. An older query still in flight is superseded.
-func (t *previewTab) start(m *Model) tea.Cmd {
+// not answer) the files. An older query still in flight is superseded. passive marks a re-query
+// the user did not ask for (the snapshot or the daemon status changed): see Model.beginPassive.
+func (t *previewTab) start(m *Model, passive bool) tea.Cmd {
 	t.asked = t.snapKey(m)
 	dir, why := t.folder(m)
 	t.seq++
@@ -134,7 +135,12 @@ func (t *previewTab) start(m *Model) tea.Cmd {
 		return nil
 	}
 	t.dir = dir
-	m.begin(previewWork, "previewing "+ellipsizeMiddle(tildeDir(san(dir), m.opts.Home), 40)+" …")
+	text := "previewing " + ellipsizeMiddle(tildeDir(san(dir), m.opts.Home), 40) + " …"
+	if passive {
+		m.beginPassive(previewWork, text)
+	} else {
+		m.begin(previewWork, text)
+	}
 	seq, ctl, via := t.seq, m.opts.Control, m.snap.Status != nil
 	cfg, cat := m.snap.Config, m.snap.Catalog
 	return func() tea.Msg {
@@ -272,11 +278,11 @@ func (t *previewTab) update(m *Model, msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
 	case snapshotMsg, statusMsg:
 		if t.asked != t.snapKey(m) {
-			return t.start(m)
+			return t.start(m, true)
 		}
 	case previewDebounceMsg:
 		if msg.seq == t.inSeq {
-			return t.start(m)
+			return t.start(m, false)
 		}
 	case previewMsg:
 		if msg.seq != t.seq {
@@ -302,7 +308,7 @@ func (t *previewTab) editKey(m *Model, k tea.KeyMsg) tea.Cmd {
 	case "enter":
 		t.stopEditing()
 		t.inSeq++
-		return t.start(m)
+		return t.start(m, false)
 	case "tab":
 		if t.paths.complete(&t.input) {
 			return t.inputChanged(m)

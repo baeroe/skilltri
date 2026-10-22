@@ -536,3 +536,17 @@ func (t *skillsTab) enableServer(m *Model, n *treeNode) tea.Cmd {
 	m.openModal(p)
 	return nil
 }
+
+// selectSource selects the source name (dropping a filter that hides it); false when the config
+// has no such source.
+func (t *skillsTab) selectSource(m *Model, name string) bool {
+	if m.snap.Config == nil || m.snap.Config.Sources[name] == nil {
+		return false
+	}
+	t.query, t.filtering = "", false
+	t.filter.SetValue("")
+	t.filter.Blur()
+	t.sel = srcKey(name)
+	t.resolve(m)
+	return true
+}
