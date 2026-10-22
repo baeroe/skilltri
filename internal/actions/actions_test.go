@@ -294,6 +294,15 @@ func TestRuleActions(t *testing.T) {
 	if err := RuleRemove(e, parse(t, "server/none"), 1); !errors.Is(err, ErrNotFound) {
 		t.Errorf("missing server = %v, want ErrNotFound", err)
 	}
+	var nr *NoRuleError
+	if err := RuleRemove(e, plugin, 5); !errors.As(err, &nr) || nr.Count != 2 || err.Error() != `no rule "5" on source/m/plugin/writing (it has 2)` {
+		t.Errorf("out of range = %v", err)
+	}
+	if _, err := RuleAdd(e, target.Target{Kind: "bogus"}, rules.Rule{Path: "/x", Mode: rules.Tree}); err == nil {
+		t.Error("bogus kind accepted")
+	} else if _, orig := target.Resolve(&config.Config{}, target.Target{Kind: "bogus"}, true); !errors.Is(err, ErrNotFound) || err.Error() != orig.Error() {
+		t.Errorf("bogus kind = %v, want ErrNotFound with the original message %v", err, orig)
+	}
 	if !bytes.Equal(before, raw(t, e)) {
 		t.Error("config changed by failed calls")
 	}

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -48,7 +49,12 @@ func RuleRemove(w io.Writer, tgt, index string) int {
 	if index == "all" {
 		err = actions.RuleClear(actEnv, t)
 	} else if n, convErr := strconv.Atoi(index); convErr != nil {
-		err = fmt.Errorf("no rule %q on %s", index, t)
+		// An impossible index still checks the target and counts the rules.
+		err = actions.RuleRemove(actEnv, t, 0)
+		var nr *actions.NoRuleError
+		if errors.As(err, &nr) {
+			err = &actions.NoRuleError{Index: index, Target: nr.Target, Count: nr.Count}
+		}
 	} else {
 		err = actions.RuleRemove(actEnv, t, n)
 	}

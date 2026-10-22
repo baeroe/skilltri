@@ -1,6 +1,9 @@
 package actions
 
 import (
+	"fmt"
+	"strconv"
+
 	"github.com/baeroe/skilltri/internal/config"
 	"github.com/baeroe/skilltri/internal/rules"
 	"github.com/baeroe/skilltri/internal/target"
@@ -10,7 +13,7 @@ import (
 func resolve(c *config.Config, t target.Target, create bool) (target.Ref, error) {
 	ref, err := target.Resolve(c, t, create)
 	if err != nil {
-		return ref, wrap(ErrNotFound, "%s", err.Error())
+		return ref, &kindError{msg: err.Error(), kind: ErrNotFound, cause: err}
 	}
 	return ref, nil
 }
@@ -35,6 +38,18 @@ func RuleAdd(e Env, t target.Target, r rules.Rule) (warnings []string, err error
 	return e.warnUnknown(t), nil
 }
 
+// NoRuleError says a rule index is out of range for a node; it matches ErrNotFound.
+type NoRuleError struct {
+	Index  string
+	Target string
+	Count  int
+}
+
+func (e *NoRuleError) Error() string {
+	return fmt.Sprintf("no rule %q on %s (it has %d)", e.Index, e.Target, e.Count)
+}
+func (e *NoRuleError) Unwrap() error { return ErrNotFound }
+
 // RuleRemove removes the rule with the 1-based index shown by `rule list`. A missing node or an
 // index out of range wraps ErrNotFound.
 func RuleRemove(e Env, t target.Target, index int) error {
@@ -44,7 +59,7 @@ func RuleRemove(e Env, t target.Target, index int) error {
 			return err
 		}
 		if index < 1 || index > len(*ref.Rules) {
-			return wrap(ErrNotFound, "no rule %d on %s (it has %d)", index, t, len(*ref.Rules))
+			return &NoRuleError{Index: strconv.Itoa(index), Target: t.String(), Count: len(*ref.Rules)}
 		}
 		*ref.Rules = append((*ref.Rules)[:index-1:index-1], (*ref.Rules)[index:]...)
 		return nil

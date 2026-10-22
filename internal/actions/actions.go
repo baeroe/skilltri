@@ -29,12 +29,18 @@ var (
 
 // kindError carries a human message and the sentinel callers match with errors.Is.
 type kindError struct {
-	msg  string
-	kind error
+	msg   string
+	kind  error
+	cause error // optional original error, kept in the chain
 }
 
 func (e *kindError) Error() string { return e.msg }
-func (e *kindError) Unwrap() error { return e.kind }
+func (e *kindError) Unwrap() []error {
+	if e.cause != nil {
+		return []error{e.kind, e.cause}
+	}
+	return []error{e.kind}
+}
 
 func wrap(kind error, format string, args ...any) error {
 	return &kindError{msg: fmt.Sprintf(format, args...), kind: kind}
