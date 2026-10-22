@@ -1,4 +1,5 @@
-// Package cli implements the commands that talk to the daemon: `status`, `which`, `update` and
+// Package cli implements the commands that edit the config (sources, skills, rules, enable/disable,
+// adapters, plugin servers) and the commands that talk to the daemon: `status`, `which`, `update` and
 // `daemon stop`. They ask the running daemon over the control socket; `which` falls back to the
 // config file when none runs, so folder rules can be checked before the daemon is up, and `update`
 // then syncs the sources itself.

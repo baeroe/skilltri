@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/baeroe/skilltri/internal/adapters"
 	"github.com/baeroe/skilltri/internal/cli"
+	"github.com/baeroe/skilltri/internal/config"
 	"github.com/baeroe/skilltri/internal/daemon"
 	"github.com/baeroe/skilltri/internal/gateway"
 	"github.com/baeroe/skilltri/internal/hook"
@@ -46,6 +48,28 @@ Usage:
                             show which servers and tools a session in dir gets
   skilltri update [source...] [--json]
                             update skill sources now (all when none is named)
+  skilltri source add local NAME PATH
+  skilltri source add git NAME URL [--ref R] [--subpath P] [--every D]
+  skilltri source add marketplace NAME URL|PATH [--ref R] [--every D]
+                            add a skill source (git and marketplace are fetched by "update")
+  skilltri source remove NAME
+  skilltri source list [--json]
+  skilltri skill new NAME   create a local skill in the config folder's skills/ directory
+  skilltri rule add TARGET MODE PATH
+                            add a folder rule (MODE: only, tree, not, not-tree)
+  skilltri rule remove TARGET INDEX|all
+  skilltri rule list [TARGET] [--json]
+  skilltri enable TARGET    TARGET: server/N[/tool/T] or source/N[/plugin/P|/skill/ID]
+  skilltri disable TARGET
+  skilltri plugin-server list [--json]
+                            MCP servers bundled with marketplace plugins
+  skilltri plugin-server enable SOURCE/PLUGIN/SERVER [--name N]
+  skilltri plugin-server accept NAME
+                            take over the plugin's changed server definition
+  skilltri adapter list [--json]
+  skilltri adapter enable ID
+  skilltri adapter disable ID
+                            choose which harnesses get project skill links
   skilltri import 1mcp [file] [--force]
                             import servers from a 1MCP mcp.json
   skilltri env [dir] [--shell zsh|bash|fish]
@@ -89,6 +113,18 @@ func run(args []string) int {
 		return runWhich(args[1:])
 	case "update":
 		return runUpdate(args[1:])
+	case "source":
+		return runSource(args[1:])
+	case "skill":
+		return runSkill(args[1:])
+	case "rule":
+		return runRule(args[1:])
+	case "enable", "disable":
+		return runEnable(args[0] == "disable", args[1:])
+	case "plugin-server":
+		return runPluginServer(args[1:])
+	case "adapter":
+		return runAdapter(args[1:])
 	case "import":
 		return runImport(args[1:])
 	case "secret":
@@ -324,6 +360,186 @@ func runUpdate(args []string) int {
 		}
 	}
 	return cli.Update(os.Stdout, names, jsonOut)
+}
+
+const usageSource = "usage: skilltri source add local NAME PATH | add git NAME URL [--ref R] [--subpath P] [--every D] | add marketplace NAME URL|PATH [--ref R] [--every D] | remove NAME | list [--json]\n"
+
+// splitFlags separates positional arguments from the value flags in valued (--ref R or --ref=R)
+// and the boolean flags in bools. ok is false on an unknown flag or a missing value.
+func splitFlags(args []string, valued, bools []string) (pos []string, vals map[string]string, flags map[string]bool, ok bool) {
+	vals, flags = map[string]string{}, map[string]bool{}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !strings.HasPrefix(a, "--") {
+			pos = append(pos, a)
+			continue
+		}
+		name, val, hasVal := strings.Cut(a, "=")
+		switch {
+		case slices.Contains(bools, name) && !hasVal:
+			flags[name] = true
+		case slices.Contains(valued, name):
+			if !hasVal {
+				if i+1 >= len(args) {
+					return nil, nil, nil, false
+				}
+				i++
+				val = args[i]
+			}
+			vals[name] = val
+		default:
+			return nil, nil, nil, false
+		}
+	}
+	return pos, vals, flags, true
+}
+
+// runSource implements the `skilltri source` subcommands.
+func runSource(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprint(os.Stderr, usageSource)
+		return 2
+	}
+	switch args[0] {
+	case "add":
+		pos, vals, _, ok := splitFlags(args[1:], []string{"--ref", "--subpath", "--every"}, nil)
+		if !ok || len(pos) != 3 {
+			fmt.Fprint(os.Stderr, usageSource)
+			return 2
+		}
+		kind, name, loc := pos[0], pos[1], pos[2]
+		src := config.Source{Type: kind, Ref: vals["--ref"], Subpath: vals["--subpath"], UpdateEvery: vals["--every"]}
+		switch kind {
+		case "local":
+			if src.Ref != "" || src.Subpath != "" || src.UpdateEvery != "" {
+				fmt.Fprint(os.Stderr, usageSource)
+				return 2
+			}
+			src.Path = cli.LocalPath(loc)
+		case "git":
+			src.URL = loc
+		case "marketplace":
+			if src.Subpath != "" {
+				fmt.Fprint(os.Stderr, usageSource)
+				return 2
+			}
+			if isPathArg(loc) {
+				src.Path = cli.LocalPath(loc)
+			} else {
+				src.URL = loc
+			}
+		default:
+			fmt.Fprint(os.Stderr, usageSource)
+			return 2
+		}
+		return cli.SourceAdd(os.Stdout, name, src)
+	case "remove":
+		if len(args) != 2 {
+			fmt.Fprint(os.Stderr, usageSource)
+			return 2
+		}
+		return cli.SourceRemove(os.Stdout, args[1])
+	case "list":
+		pos, _, flags, ok := splitFlags(args[1:], nil, []string{"--json"})
+		if !ok || len(pos) != 0 {
+			fmt.Fprint(os.Stderr, usageSource)
+			return 2
+		}
+		return cli.SourceList(os.Stdout, flags["--json"])
+	}
+	fmt.Fprint(os.Stderr, usageSource)
+	return 2
+}
+
+// isPathArg reports whether a marketplace argument names a folder rather than a URL.
+func isPathArg(s string) bool {
+	if strings.HasPrefix(s, "/") || strings.HasPrefix(s, "~") || strings.HasPrefix(s, ".") {
+		return true
+	}
+	st, err := os.Stat(s)
+	return err == nil && st.IsDir()
+}
+
+// runSkill implements `skilltri skill new NAME`.
+func runSkill(args []string) int {
+	if len(args) != 2 || args[0] != "new" {
+		fmt.Fprint(os.Stderr, "usage: skilltri skill new NAME\n")
+		return 2
+	}
+	return cli.SkillNew(os.Stdout, args[1])
+}
+
+// runRule implements the `skilltri rule` subcommands.
+func runRule(args []string) int {
+	const usageMsg = "usage: skilltri rule add TARGET MODE PATH | remove TARGET INDEX|all | list [TARGET] [--json]\n"
+	if len(args) == 0 {
+		fmt.Fprint(os.Stderr, usageMsg)
+		return 2
+	}
+	switch pos, _, flags, ok := splitFlags(args[1:], nil, []string{"--json"}); {
+	case !ok:
+	case args[0] == "add" && len(pos) == 3 && !flags["--json"]:
+		return cli.RuleAdd(os.Stdout, pos[0], pos[1], pos[2])
+	case args[0] == "remove" && len(pos) == 2 && !flags["--json"]:
+		return cli.RuleRemove(os.Stdout, pos[0], pos[1])
+	case args[0] == "list" && len(pos) <= 1:
+		tgt := ""
+		if len(pos) == 1 {
+			tgt = pos[0]
+		}
+		return cli.RuleList(os.Stdout, tgt, flags["--json"])
+	}
+	fmt.Fprint(os.Stderr, usageMsg)
+	return 2
+}
+
+// runEnable implements `skilltri enable TARGET` and `skilltri disable TARGET`.
+func runEnable(disable bool, args []string) int {
+	if len(args) != 1 || strings.HasPrefix(args[0], "-") {
+		fmt.Fprintf(os.Stderr, "usage: skilltri %s TARGET\n", map[bool]string{false: "enable", true: "disable"}[disable])
+		return 2
+	}
+	return cli.SetDisabled(os.Stdout, args[0], disable)
+}
+
+// runPluginServer implements the `skilltri plugin-server` subcommands.
+func runPluginServer(args []string) int {
+	const usageMsg = "usage: skilltri plugin-server list [--json] | enable SOURCE/PLUGIN/SERVER [--name N] | accept NAME\n"
+	if len(args) == 0 {
+		fmt.Fprint(os.Stderr, usageMsg)
+		return 2
+	}
+	pos, vals, flags, ok := splitFlags(args[1:], []string{"--name"}, []string{"--json"})
+	switch {
+	case !ok:
+	case args[0] == "list" && len(pos) == 0 && len(vals) == 0:
+		return cli.PluginServerList(os.Stdout, flags["--json"])
+	case args[0] == "enable" && len(pos) == 1 && !flags["--json"]:
+		return cli.PluginServerEnable(os.Stdout, pos[0], vals["--name"])
+	case args[0] == "accept" && len(pos) == 1 && len(vals) == 0 && !flags["--json"]:
+		return cli.PluginServerAccept(os.Stdout, pos[0])
+	}
+	fmt.Fprint(os.Stderr, usageMsg)
+	return 2
+}
+
+// runAdapter implements the `skilltri adapter` subcommands.
+func runAdapter(args []string) int {
+	const usageMsg = "usage: skilltri adapter list [--json] | enable ID | disable ID\n"
+	if len(args) == 0 {
+		fmt.Fprint(os.Stderr, usageMsg)
+		return 2
+	}
+	pos, _, flags, ok := splitFlags(args[1:], nil, []string{"--json"})
+	switch {
+	case !ok:
+	case args[0] == "list" && len(pos) == 0:
+		return cli.AdapterList(os.Stdout, flags["--json"])
+	case (args[0] == "enable" || args[0] == "disable") && len(pos) == 1 && !flags["--json"]:
+		return cli.AdapterSet(os.Stdout, pos[0], args[0] == "enable")
+	}
+	fmt.Fprint(os.Stderr, usageMsg)
+	return 2
 }
 
 // runService installs or uninstalls the login service for the running binary.

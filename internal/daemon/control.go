@@ -11,6 +11,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/baeroe/skilltri/internal/catalog"
 	"github.com/baeroe/skilltri/internal/config"
 	"github.com/baeroe/skilltri/internal/downstream"
 	"github.com/baeroe/skilltri/internal/gateway"
@@ -41,6 +42,22 @@ type StatusReply struct {
 type WhichReply struct {
 	Dir     string
 	Servers []WhichServer
+	Skills  []WhichSkill
+}
+
+// WhichSkill is one catalog skill's decision for the folder. Plugin is the marketplace entry name.
+type WhichSkill struct {
+	ID, Source, Plugin string
+	Decision           rules.Decision
+}
+
+// WhichSkills decides every skill of c for dir (already normalized), sorted by ID.
+func WhichSkills(c *catalog.Catalog, cfg *config.Config, dir string) []WhichSkill {
+	var out []WhichSkill
+	for _, d := range catalog.Evaluate(c, cfg, dir) {
+		out = append(out, WhichSkill{ID: d.Entry.ID, Source: d.Entry.Source, Plugin: d.Entry.Plugin, Decision: d.Decision})
+	}
+	return out
 }
 
 // WhichServer is one configured server's decision for the folder.
@@ -184,7 +201,7 @@ func (d *Daemon) which(h Hello) (WhichReply, error) {
 	for _, s := range d.servers() {
 		states[s.Name] = s.State
 	}
-	reply := WhichReply{Dir: dir}
+	reply := WhichReply{Dir: dir, Skills: WhichSkills(d.Catalog(), cfg, dir)}
 	for _, sd := range gateway.Servers(cfg, dir) {
 		ws := WhichServer{Name: sd.Name, Decision: sd.Decision, State: states[sd.Name]}
 		// A perSession server would start a new instance for this request, so it lists no tools.
