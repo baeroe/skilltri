@@ -446,3 +446,18 @@ func TestSyncRelativeSkillDir(t *testing.T) {
 		t.Fatalf("link does not resolve: %v", err)
 	}
 }
+
+func TestSyncExcludeLongLine(t *testing.T) {
+	root := gitRepo(t)
+	exc := filepath.Join(root, ".git", "info", "exclude")
+	long := "/" + strings.Repeat("x", 100*1024)
+	writeFile(t, exc, "*.log\n"+long+"\n/tail\n")
+	src := t.TempDir()
+	if _, err := SyncProjectDir(root, rel, []catalog.Entry{entry("alpha", "", skillDir(t, src, "alpha"))}); err != nil {
+		t.Fatal(err)
+	}
+	want := "*.log\n" + long + "\n/tail\n# skilltri\n/.agents/skills/.skilltri.json\n/.agents/skills/alpha\n"
+	if got := readExclude(t, filepath.Join(root, ".git")); got != want {
+		t.Fatalf("exclude lost content: got %d bytes, want %d", len(got), len(want))
+	}
+}

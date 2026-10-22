@@ -1,8 +1,6 @@
 package adapters
 
 import (
-	"bufio"
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -264,10 +262,9 @@ func exclude(sessionDir, rel string, links []string) error {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	var lines []string
-	sc := bufio.NewScanner(bytes.NewReader(old))
-	for sc.Scan() {
-		lines = append(lines, sc.Text())
+	var lines []string // no line length limit, unlike bufio.Scanner
+	if len(old) > 0 {
+		lines = strings.Split(strings.TrimSuffix(string(old), "\n"), "\n")
 	}
 	present := map[string]bool{}
 	for _, l := range lines {
