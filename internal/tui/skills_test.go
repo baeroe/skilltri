@@ -676,3 +676,36 @@ func TestSkillsNoOverflow(t *testing.T) {
 		}
 	}
 }
+
+// TestDefaultUpdateSources runs the default Options.Update offline (no daemon socket): the catalog
+// is saved after a finished and after a cancelled update, so catalog.json matches the checkouts.
+func TestDefaultUpdateSources(t *testing.T) {
+	h := newHarness(t, TabSkills)
+	local := filepath.Join(h.dir, "local-skills")
+	writeSkill(t, local, "demo-alpha", "Alpha demo skill.")
+	h.writeConfig(&config.Config{Version: 1, Sources: map[string]*config.Source{"demo-local": {Type: "local", Path: local}}})
+	o, catPath := h.m.opts, h.m.opts.Env.CatalogPath
+	hasAlpha := func(what string) {
+		t.Helper()
+		c, err := catalog.Load(catPath)
+		if err != nil {
+			t.Fatalf("%s: catalog not written: %v", what, err)
+		}
+		if len(c.Skills) != 1 || c.Skills[0].ID != "demo-alpha" {
+			t.Errorf("%s: catalog skills = %+v", what, c.Skills)
+		}
+	}
+
+	if _, err := o.updateSources(context.Background(), nil, true); err != nil { // falls back to offline
+		t.Fatalf("update: %v", err)
+	}
+	hasAlpha("finished")
+
+	os.Remove(catPath)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := o.updateSources(ctx, nil, false); !errors.Is(err, context.Canceled) {
+		t.Errorf("cancelled update err = %v, want context.Canceled", err)
+	}
+	hasAlpha("cancelled")
+}

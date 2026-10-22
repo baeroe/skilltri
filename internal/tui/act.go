@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -89,8 +90,10 @@ func needConfig(m *Model) bool {
 }
 
 // updateSources is the default Options.Update: the daemon's "update" (cancelled with ctx, which
-// only stops waiting: the daemon finishes on its own), else an offline sync with Env.Builder whose
-// catalog is saved unless ctx was cancelled.
+// only stops waiting: the daemon finishes on its own), else an offline sync with Env.Builder. The
+// offline catalog is saved also when ctx was cancelled (then rebuilt from the checkouts without
+// syncing, as a cancelled sync may have changed some), so catalog.json matches the checkouts and
+// the lock; the error is then ctx's.
 func (o Options) updateSources(ctx context.Context, names []string, viaDaemon bool) (daemon.UpdateReply, error) {
 	if viaDaemon {
 		var r daemon.UpdateReply
@@ -108,11 +111,12 @@ func (o Options) updateSources(ctx context.Context, names []string, viaDaemon bo
 		b = daemon.DefaultBuilder()
 	}
 	r, c := daemon.Update(ctx, b, cfg, names)
-	if err := ctx.Err(); err != nil {
-		return r, err
+	cerr := ctx.Err()
+	if cerr != nil {
+		c, _ = b.Build(context.Background(), cfg, false) // Build never fails, see daemon.Update
 	}
 	if err := catalog.Save(o.catalogPath(), c); err != nil {
-		return r, fmt.Errorf("save catalog: %w", err)
+		return r, errors.Join(cerr, fmt.Errorf("save catalog: %w", err))
 	}
-	return r, nil
+	return r, cerr
 }
