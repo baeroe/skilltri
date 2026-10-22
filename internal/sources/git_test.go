@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -271,5 +272,52 @@ func TestPinned(t *testing.T) {
 		if got := Pinned(in); got != want {
 			t.Errorf("Pinned(%q) = %v, want %v", in, got, want)
 		}
+	}
+}
+
+func TestSyncDeletedBranchKeepsCheckout(t *testing.T) {
+	r := newRepo(t)
+	f := newFetcher(t)
+	mustSync(t, f, "demo", r.url(), "main")
+	b := r.commit("a.txt", "B")
+	mustSync(t, f, "demo", r.url(), "main")
+
+	run(t, r.dir, "branch", "-m", "main", "trunk")
+	if co, err := f.Sync(context.Background(), "demo", r.url(), "main"); err == nil {
+		t.Fatalf("deleted branch: no error, checkout %+v", co)
+	}
+	if cur, ok := f.Current("demo"); !ok || cur.Commit != b {
+		t.Fatalf("Current = %+v, %v; want commit %s", cur, ok, b)
+	}
+}
+
+func TestSyncRejectsBadKeys(t *testing.T) {
+	gitEnv(t)
+	f := newFetcher(t)
+	for _, key := range []string{"", "..", "../x", "a/../b", "a//b", "/abs", "a/", "./a", `a\b`} {
+		if _, err := f.Sync(context.Background(), key, "file:///nowhere", ""); err == nil {
+			t.Errorf("Sync(key %q): no error", key)
+		}
+		if _, ok := f.Current(key); ok {
+			t.Errorf("Current(key %q) reports a checkout", key)
+		}
+	}
+	if entries, _ := os.ReadDir(filepath.Dir(f.Root)); len(entries) != 0 {
+		t.Fatalf("bad keys created files: %v", entries)
+	}
+}
+
+func TestCommandEnv(t *testing.T) {
+	has := func(env []string, kv string) bool { return slices.Contains(env, kv) }
+	t.Setenv("GIT_SSH_COMMAND", "")
+	env := commandEnv()
+	for _, kv := range []string{"GIT_TERMINAL_PROMPT=0", "SSH_ASKPASS_REQUIRE=never", "GIT_SSH_COMMAND=ssh -o BatchMode=yes"} {
+		if !has(env, kv) {
+			t.Errorf("missing %s", kv)
+		}
+	}
+	t.Setenv("GIT_SSH_COMMAND", "demo-ssh")
+	if env := commandEnv(); has(env, "GIT_SSH_COMMAND=ssh -o BatchMode=yes") || !has(env, "GIT_SSH_COMMAND=demo-ssh") {
+		t.Errorf("user GIT_SSH_COMMAND overridden: %v", env)
 	}
 }
