@@ -17,14 +17,16 @@ func ServerAdd(e Env, name string, s config.Server) error {
 	})
 }
 
-// ServerUpdate replaces the server name with s but keeps Rules, Tools and Origin of the existing
-// entry when s has them nil. A missing server wraps ErrNotFound.
+// ServerUpdate replaces the server name with s but keeps Disabled (SetDisabled changes it) and,
+// when s has them nil, Rules, Tools and Origin of the existing entry. A missing server wraps
+// ErrNotFound.
 func ServerUpdate(e Env, name string, s config.Server) error {
 	return e.edit(func(c *config.Config) error {
 		old := c.Servers[name]
 		if old == nil {
 			return wrap(ErrNotFound, "no such server %q", name)
 		}
+		s.Disabled = old.Disabled
 		if s.Rules == nil {
 			s.Rules = old.Rules
 		}

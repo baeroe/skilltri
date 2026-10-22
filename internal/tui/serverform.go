@@ -231,9 +231,11 @@ func newServerForm(t *serversTab, name string, s *config.Server, home string) *s
 	}
 	d := f.addText("cwd", "Cwd", cwd, "absolute folder (empty: the daemon's)")
 	d.hidden = isHTTP
+	// Existing literal env and header values are shown as they are on purpose: editing needs them
+	// (the details pane masks them). ctrl+k moves a value into the keyring.
 	e := f.addLines("env", "Env", envPairs.lines(s.Env), "KEY=value, one per line")
 	e.hidden = isHTTP
-	e.help = "enter: new line · secret:NAME refers to the keyring · ctrl+s stores this line's value in the keyring"
+	e.help = "enter: new line · secret:NAME refers to the keyring · ctrl+k stores this line's value in the keyring"
 	f.startSection("Connection")
 	u := f.addText("url", "URL", s.URL, "https://…")
 	u.hidden = isStdio
@@ -251,9 +253,12 @@ func newServerForm(t *serversTab, name string, s *config.Server, home string) *s
 	return sf
 }
 
+// workKey is the busy key (Model.begin) of this form's work of kind ("save", "secret").
+func (sf *serverForm) workKey(kind string) string { return fmt.Sprintf("serverform:%p:%s", sf, kind) }
+
 func (sf *serverForm) hints() []string {
 	if fl := sf.form.current(); fl.kind == linesField {
-		return []string{"ctrl+s", "value → keyring", "enter", "new line", "tab", "next field", "esc", "cancel"}
+		return []string{"ctrl+s", "save", "ctrl+k", "value to keyring", "enter", "new line", "esc", "cancel"}
 	}
 	return []string{"ctrl+s", "save", "tab", "next field", "esc", "cancel"}
 }
@@ -267,8 +272,9 @@ func (sf *serverForm) update(m *Model, msg tea.Msg) (tea.Cmd, bool) {
 		if f.busy != "" {
 			return nil, false
 		}
-		if fl := f.current(); msg.String() == "ctrl+s" && fl.kind == linesField {
-			return sf.storeSecret(fl), false
+		f.layout(m.width)
+		if fl := f.current(); msg.String() == "ctrl+k" && fl.kind == linesField {
+			return sf.storeSecret(m, fl), false
 		}
 		cmd, submit := f.key(msg)
 		if submit {
@@ -315,7 +321,7 @@ func (sf *serverForm) update(m *Model, msg tea.Msg) (tea.Cmd, bool) {
 
 // storeSecret stores the literal value of the focused line of an env or headers field in the
 // keyring (in a command) and replaces it with the reference.
-func (sf *serverForm) storeSecret(fl *field) tea.Cmd {
+func (sf *serverForm) storeSecret(m *Model, fl *field) tea.Cmd {
 	f := sf.form
 	pk := envPairs
 	if fl.key == "headers" {
@@ -341,6 +347,9 @@ func (sf *serverForm) storeSecret(fl *field) tea.Cmd {
 		return nil
 	}
 	name := secretName(server, k)
+	if !m.begin(sf.workKey("secret"), "storing "+name+" in the keyring …") {
+		return nil
+	}
 	f.busy = "storing the value in the keyring …"
 	msg := secretStoredMsg{f: sf, key: fl.key, line: fl.line, was: line, with: pk.format(k, secrets.Ref(name)), name: name}
 	return func() tea.Msg {
@@ -421,11 +430,9 @@ func (sf *serverForm) save(m *Model) tea.Cmd {
 	if !ok {
 		return nil
 	}
-	env, orig := m.opts.Env, sf.orig
-	if orig != "" && m.snap.Config != nil {
-		if cur := m.snap.Config.Servers[orig]; cur != nil {
-			s.Disabled = cur.Disabled // Rules, Tools and Origin are kept by ServerUpdate
-		}
+	env, orig := m.opts.Env, sf.orig // ServerUpdate keeps Disabled, Rules, Tools and Origin
+	if !m.begin(sf.workKey("save"), "saving "+name+" …") {
+		return nil
 	}
 	sf.form.busy = "saving …"
 	return func() tea.Msg {

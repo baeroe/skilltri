@@ -133,6 +133,8 @@ func (h *harness) key(keys ...string) {
 			msg = tea.KeyMsg{Type: tea.KeyBackspace}
 		case "ctrl+s":
 			msg = tea.KeyMsg{Type: tea.KeyCtrlS}
+		case "ctrl+k":
+			msg = tea.KeyMsg{Type: tea.KeyCtrlK}
 		case "ctrl+u":
 			msg = tea.KeyMsg{Type: tea.KeyCtrlU}
 		case " ":

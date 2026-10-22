@@ -94,9 +94,10 @@ func TestServerActions(t *testing.T) {
 		t.Error("config changed by invalid adds")
 	}
 
-	// Update keeps rules, tools and origin unless set.
+	// Update keeps disabled, and rules, tools and origin unless set.
 	err := config.Update(e.ConfigPath, func(c *config.Config) error {
 		s := c.Servers["alpha"]
+		s.Disabled = true
 		s.Rules = []rules.Rule{{Path: "/w", Mode: rules.Tree}}
 		s.Tools = map[string]*config.Tool{"ping": {Disabled: true}}
 		s.Origin = &config.Origin{Source: "m", Plugin: "p", Server: "s"}
@@ -112,8 +113,11 @@ func TestServerActions(t *testing.T) {
 	if s.Type != "http" || s.URL != "https://example.com/mcp" || s.Command != "" {
 		t.Errorf("connection not replaced: %+v", s)
 	}
-	if len(s.Rules) != 1 || !s.Tools["ping"].Disabled || s.Origin == nil || s.Origin.Source != "m" {
-		t.Errorf("rules/tools/origin lost: %+v", s)
+	if len(s.Rules) != 1 || !s.Tools["ping"].Disabled || s.Origin == nil || s.Origin.Source != "m" || !s.Disabled {
+		t.Errorf("disabled/rules/tools/origin lost: %+v", s)
+	}
+	if err := ServerUpdate(e, "alpha", config.Server{Type: "http", URL: "https://example.com/mcp", Disabled: false}); err != nil || !load(t, e).Servers["alpha"].Disabled {
+		t.Errorf("update changed disabled: %v", err)
 	}
 	newRules := []rules.Rule{{Path: "/other", Mode: rules.Not}}
 	if err := ServerUpdate(e, "alpha", config.Server{Type: "stdio", Command: "x", Rules: newRules}); err != nil {

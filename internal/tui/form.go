@@ -358,13 +358,32 @@ func choiceView(opts []string, cur int, focused bool) string {
 	return strings.Join(parts, "  ")
 }
 
+// formDims are the box width, its inner width, the label width and the input width of a form
+// shown in a body w cells wide.
+func formDims(w int) (fw, iw, lw, inW int) {
+	fw = min(w, 84)
+	iw = max(fw-4, 1)
+	lw = min(14, max(iw/3, 4))
+	inW = max(iw-2-lw, 4)
+	return fw, iw, lw, inW
+}
+
+// layout sizes the inputs for a body w cells wide; the owner calls it before passing keys (view
+// does not change state, it only cuts what does not fit).
+func (f *form) layout(w int) {
+	_, _, _, inW := formDims(w)
+	for _, fl := range f.fields {
+		fl.input.Width = max(inW-1, 1)
+		for j := range fl.lines {
+			fl.lines[j].Width = max(inW-1, 1)
+		}
+	}
+}
+
 // view renders the form as a modal box of at most w x h cells; it scrolls to keep the focused field
 // visible.
 func (f *form) view(w, h int) string {
-	fw := min(w, 84)
-	iw := max(fw-4, 1)
-	lw := min(14, max(iw/3, 4))
-	inW := max(iw-2-lw, 4)
+	fw, iw, lw, inW := formDims(w)
 	indent := strings.Repeat(" ", lw+2)
 	var lines []string
 	focusLine, focusEnd := 0, 0
@@ -383,7 +402,7 @@ func (f *form) view(w, h int) string {
 		focused := i == f.focus
 		label, mark := labelStyle.Render(fit(fl.label, lw)), "  "
 		if focused {
-			label, mark = selStyle.Render(fit(fl.label, lw)), selStyle.Render("› ")
+			label, mark = selStyle.Render(fit(fl.label, lw)), selStyle.Render("▸ ")
 			focusLine = len(lines)
 		}
 		switch fl.kind {
@@ -400,21 +419,19 @@ func (f *form) view(w, h int) string {
 			lines = append(lines, mark+label+box)
 		case linesField:
 			for j := range fl.lines {
-				fl.lines[j].Width = max(inW-1, 1)
 				v := ansi.Truncate(fl.lines[j].View(), inW, "")
 				if j == 0 {
 					lines = append(lines, mark+label+v)
 					continue
 				}
 				if focused && j == fl.line {
-					v = selStyle.Render("›") + " " + ansi.Truncate(fl.lines[j].View(), max(inW-2, 1), "")
+					v = selStyle.Render("▸") + " " + ansi.Truncate(fl.lines[j].View(), max(inW-2, 1), "")
 					lines = append(lines, strings.Repeat(" ", lw)+"  "+v)
 					continue
 				}
 				lines = append(lines, indent+v)
 			}
 		default:
-			fl.input.Width = max(inW-1, 1)
 			lines = append(lines, mark+label+ansi.Truncate(fl.input.View(), inW, ""))
 		}
 		if fl.err != "" {

@@ -19,6 +19,10 @@
 //     is called on quit.
 //   - Nothing in Update blocks: loading, daemon calls and other work run in tea.Cmds; results come
 //     back as messages. Action results are reported with Model.flash in the footer's status line.
+//   - Work in flight is shown with Model.begin(key, text): the status line shows a spinner and text
+//     until Model.end(key), which the handler of the result message calls. begin returns false while
+//     key is already pending, so a repeated key press does not start the same work twice. The
+//     spinner advances on a spinMsg every spinInterval, scheduled only while something is busy.
 package tui
 
 import (
@@ -132,7 +136,73 @@ type Model struct {
 	statusErr bool
 	statusAt  time.Time
 
+	busyKeys []string          // pending work, oldest first (see begin)
+	busyText map[string]string // its status text
+	spinning bool              // a spinMsg is scheduled
+	spinStep int
+
 	quitting bool
+}
+
+// spinInterval is the spinner's frame time; spinFrames are its ASCII frames.
+const spinInterval = 120 * time.Millisecond
+
+var spinFrames = []string{"|", "/", "-", "\\"}
+
+// spinMsg advances the spinner.
+type spinMsg struct{}
+
+// begin marks the work key as running with the status text ("restarting demo …"). It returns
+// false, changing nothing, when key is already running.
+func (m *Model) begin(key, text string) bool {
+	if _, ok := m.busyText[key]; ok {
+		return false
+	}
+	if m.busyText == nil {
+		m.busyText = map[string]string{}
+	}
+	m.busyKeys = append(m.busyKeys, key)
+	m.busyText[key] = text
+	return true
+}
+
+// end marks the work key as done (a no-op when it is not running).
+func (m *Model) end(key string) {
+	if _, ok := m.busyText[key]; !ok {
+		return
+	}
+	delete(m.busyText, key)
+	for i, k := range m.busyKeys {
+		if k == key {
+			m.busyKeys = append(m.busyKeys[:i], m.busyKeys[i+1:]...)
+			break
+		}
+	}
+}
+
+// busy reports whether the work key is running.
+func (m *Model) busy(key string) bool { _, ok := m.busyText[key]; return ok }
+
+// busyLine is the spinner and the newest pending work ("" when idle).
+func (m *Model) busyLine() string {
+	n := len(m.busyKeys)
+	if n == 0 {
+		return ""
+	}
+	s := spinFrames[m.spinStep%len(spinFrames)] + " " + m.busyText[m.busyKeys[n-1]]
+	if n > 1 {
+		s += " (+" + itoa(n-1) + ")"
+	}
+	return s
+}
+
+// spin schedules the next spinner frame while something is busy (not with NoTick: tests).
+func (m *Model) spin() tea.Cmd {
+	if len(m.busyKeys) == 0 || m.spinning || m.opts.NoTick {
+		return nil
+	}
+	m.spinning = true
+	return tea.Tick(spinInterval, func(time.Time) tea.Msg { return spinMsg{} })
 }
 
 // New creates the model; Init starts the first snapshot load.
@@ -263,12 +333,21 @@ func (m *Model) quit() tea.Cmd {
 
 // Update handles messages.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	cmd := m.update(msg)
+	return m, tea.Batch(cmd, m.spin())
+}
+
+func (m *Model) update(msg tea.Msg) tea.Cmd {
 	switch msg := msg.(type) {
+	case spinMsg:
+		m.spinning = false
+		m.spinStep++
+		return nil
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		return m, nil
+		return nil
 	case tea.KeyMsg:
-		return m, m.handleKey(msg)
+		return m.handleKey(msg)
 	case tickMsg:
 		if m.statusText() == "" {
 			m.status = ""
@@ -277,10 +356,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.opts.NoTick {
 			cmds = append(cmds, tick())
 		}
-		return m, tea.Batch(cmds...)
+		return tea.Batch(cmds...)
 	case snapshotMsg:
 		if msg.seq < m.snapSeq {
-			return m, nil // an older load finished after a newer one
+			return nil // an older load finished after a newer one
 		}
 		if msg.seq == m.loadSeq {
 			m.loading = false
@@ -295,7 +374,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case statusMsg:
 		m.statusBusy = false
 		if msg.seq <= m.statusSeq {
-			return m, nil
+			return nil
 		}
 		m.statusSeq = msg.seq
 		m.snap.Status, m.snap.DaemonErr = msg.status, msg.err
@@ -303,9 +382,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.stamps != m.stamps && !m.loading {
 			reload = m.reload()
 		}
-		return m, tea.Batch(reload, m.broadcast(msg))
+		return tea.Batch(reload, m.broadcast(msg))
 	}
-	return m, m.broadcast(msg)
+	return m.broadcast(msg)
 }
 
 // broadcast hands a non-key message to every tab and every open modal.
@@ -490,13 +569,15 @@ func (m *Model) hints() []string {
 // footer shows the key hints on the left and the status line on the right.
 func (m *Model) footer(w int) string {
 	left := " " + keyHints(m.hints()...)
-	status := m.statusText()
-	if status == "" {
-		return fit(left, w)
-	}
-	st := goodStyle
+	status, st := m.statusText(), goodStyle
 	if m.statusErr {
 		st = badStyle
+	}
+	if b := m.busyLine(); b != "" {
+		status, st = b, warnStyle
+	}
+	if status == "" {
+		return fit(left, w)
 	}
 	room := w - width(left) - 3
 	if room < width(status) { // the status wins over the hints while it is shown

@@ -5,18 +5,19 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// confirmModal asks before an action: y (or enter) runs it, any other key cancels.
+// confirmModal asks before an action: y (or enter, unless onlyY) runs it, any other key cancels.
 type confirmModal struct {
 	title string
 	body  []string // already styled lines; long lines are cut to the box
 	yes   string   // what y does ("remove", "accept")
+	onlyY bool     // only y confirms (destructive actions), not enter
 	color lipgloss.Color
 	run   func(m *Model) tea.Cmd
 }
 
 // confirmDanger is a confirmation of a destructive action (red box).
 func confirmDanger(title string, body []string, yes string, run func(m *Model) tea.Cmd) *confirmModal {
-	return &confirmModal{title: title, body: body, yes: yes, color: cRed, run: run}
+	return &confirmModal{title: title, body: body, yes: yes, onlyY: true, color: cRed, run: run}
 }
 
 func (c *confirmModal) update(m *Model, msg tea.Msg) (tea.Cmd, bool) {
@@ -25,8 +26,12 @@ func (c *confirmModal) update(m *Model, msg tea.Msg) (tea.Cmd, bool) {
 		return nil, false
 	}
 	switch k.String() {
-	case "y", "Y", "enter":
+	case "y", "Y":
 		return c.run(m), true
+	case "enter":
+		if !c.onlyY {
+			return c.run(m), true
+		}
 	}
 	return nil, true
 }

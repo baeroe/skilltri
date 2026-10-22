@@ -14,6 +14,7 @@ import (
 	"github.com/baeroe/skilltri/internal/config"
 	"github.com/baeroe/skilltri/internal/daemon"
 	"github.com/baeroe/skilltri/internal/downstream"
+	"github.com/baeroe/skilltri/internal/gateway"
 	"github.com/baeroe/skilltri/internal/rules"
 	"github.com/baeroe/skilltri/internal/target"
 )
@@ -31,11 +32,13 @@ type serversTab struct {
 	filter    textinput.Model
 	query     string
 
-	which     *daemon.WhichReply // the daemon's which for Options.Cwd (nil: none yet / offline)
-	whichErr  error
-	whichKey  string // ready servers the which reply was asked for
-	whichBusy bool
+	which    *daemon.WhichReply // the daemon's which for Options.Cwd (nil: none yet / offline)
+	whichErr error
+	whichKey string // ready servers the which reply was asked for
 }
+
+// whichWork is the busy key of the which request.
+const whichWork = "servers:which"
 
 // whichMsg is the result of the tab's which request.
 type whichMsg struct {
@@ -46,6 +49,7 @@ type whichMsg struct {
 
 // serverActionMsg is the result of an action started from the tab (toggle, remove, restart …).
 type serverActionMsg struct {
+	key    string // busy key (Model.begin) of the action
 	text   string
 	err    error
 	reload bool // the config changed: reload the snapshot
@@ -127,10 +131,9 @@ func readyKey(st *daemon.StatusReply) string {
 
 // fetchWhich asks the daemon (in a command) which tools the servers offer in the Preview folder.
 func (t *serversTab) fetchWhich(m *Model) tea.Cmd {
-	if m.snap.Status == nil || t.whichBusy {
+	if m.snap.Status == nil || !m.begin(whichWork, "asking the daemon for tool lists …") {
 		return nil
 	}
-	t.whichBusy = true
 	key, ctl, dir := readyKey(m.snap.Status), m.opts.Control, m.opts.Cwd
 	return func() tea.Msg {
 		var r daemon.WhichReply
@@ -199,12 +202,12 @@ func (t *serversTab) update(m *Model, msg tea.Msg) tea.Cmd {
 			t.which, t.whichErr = nil, nil
 			return nil
 		}
-		// a failed which is retried only when the set of ready servers changes (or on a reload)
-		if readyKey(m.snap.Status) != t.whichKey || (t.which == nil && t.whichErr == nil) {
+		// asked again when the ready servers changed, and on every tick after a failure
+		if readyKey(m.snap.Status) != t.whichKey || t.which == nil || t.whichErr != nil {
 			return t.fetchWhich(m)
 		}
 	case whichMsg:
-		t.whichBusy = false
+		m.end(whichWork)
 		t.whichKey = msg.key
 		if msg.err != nil {
 			t.whichErr = msg.err
@@ -212,6 +215,7 @@ func (t *serversTab) update(m *Model, msg tea.Msg) tea.Cmd {
 		}
 		t.which, t.whichErr = msg.reply, nil
 	case serverActionMsg:
+		m.end(msg.key)
 		if msg.err != nil {
 			m.flash(msg.err.Error(), true)
 		} else {
@@ -225,7 +229,10 @@ func (t *serversTab) update(m *Model, msg tea.Msg) tea.Cmd {
 			cmds = append(cmds, m.refreshStatus())
 		}
 		return tea.Batch(cmds...)
+	case secretStoredMsg:
+		m.end(msg.f.workKey("secret"))
 	case serverSavedMsg:
+		m.end(msg.f.workKey("save"))
 		if msg.err != nil {
 			if !slices.Contains(m.modals, modal(msg.f)) { // the form was closed while saving
 				m.flash("save "+msg.name+": "+msg.err.Error(), true)
@@ -296,6 +303,7 @@ func (t *serversTab) listKey(m *Model, key string) tea.Cmd {
 		}
 		return nil
 	case "/":
+		t.filter.Width = max(listPaneWidth(m.width)-6, 1)
 		t.filtering = true
 		t.filter.SetValue(t.query)
 		t.filter.CursorEnd()
@@ -313,7 +321,9 @@ func (t *serversTab) listKey(m *Model, key string) tea.Cmd {
 		return nil
 	}
 	if key == "a" {
-		m.openModal(newServerForm(t, "", nil, m.opts.Home))
+		sf := newServerForm(t, "", nil, m.opts.Home)
+		sf.form.layout(m.width)
+		m.openModal(sf)
 		return nil
 	}
 	s := t.server(m)
@@ -326,18 +336,20 @@ func (t *serversTab) listKey(m *Model, key string) tea.Cmd {
 	name := t.sel
 	switch key {
 	case "e":
-		m.openModal(newServerForm(t, name, s, m.opts.Home))
+		sf := newServerForm(t, name, s, m.opts.Home)
+		sf.form.layout(m.width)
+		m.openModal(sf)
 	case "d":
 		body := []string{"Remove server " + boldStyle.Render(oneLine(name)) + "?",
 			dimStyle.Render("Its rules and tool settings go too.")}
 		m.openModal(confirmDanger("Remove server", body, "remove", func(m *Model) tea.Cmd {
 			env := m.opts.Env
-			return t.act(true, func() (string, error) {
+			return t.act(m, "server:"+name, "removing "+name+" …", true, func() (string, error) {
 				return "removed " + name, actions.ServerRemove(env, name)
 			})
 		}))
 	case " ":
-		return t.setDisabled(m, target.Target{Kind: "server", Server: name}, !s.Disabled, name)
+		return t.setDisabled(m, target.Target{Kind: "server", Server: name}, !s.Disabled, name, "")
 	case "t", "enter":
 		items := t.toolItems(m, name)
 		if len(items) == 0 {
@@ -353,12 +365,15 @@ func (t *serversTab) listKey(m *Model, key string) tea.Cmd {
 			m.flash("the daemon is not running: nothing to restart", true)
 			return nil
 		}
-		ctl := m.opts.Control
+		key, ctl := "restart:"+name, m.opts.Control
+		if !m.begin(key, "restarting "+name+" …") {
+			return nil
+		}
 		return func() tea.Msg {
 			if err := ctl(daemon.Hello{Cmd: "restart", Args: []string{name}}, nil); err != nil {
-				return serverActionMsg{err: fmt.Errorf("restart %s: %w", name, err)}
+				return serverActionMsg{key: key, err: fmt.Errorf("restart %s: %w", name, err)}
 			}
-			return serverActionMsg{text: "restarted " + name, status: true}
+			return serverActionMsg{key: key, text: "restarted " + name, status: true}
 		}
 	case "A":
 		return t.accept(m, name, s)
@@ -390,26 +405,66 @@ func (t *serversTab) toolKey(m *Model, key string) tea.Cmd {
 		}
 		it := items[i]
 		disabled := it.cfg == nil || !it.cfg.Disabled
-		return t.setDisabled(m, target.Target{Kind: "tool", Server: t.sel, Tool: it.name}, disabled, "tool "+it.name+" of "+t.sel)
+		note := ""
+		if dir, ok := t.rulesExclude(m, t.sel, it.name); ok {
+			if disabled {
+				note = " (rules also exclude it in " + dir + ")"
+			} else {
+				note = ", but rules exclude it in " + dir
+			}
+		}
+		return t.setDisabled(m, target.Target{Kind: "tool", Server: t.sel, Tool: it.name}, disabled, "tool "+it.name+" of "+t.sel, note)
 	}
 	return nil
 }
 
-// act runs fn in a command and reports its text or error in the status line.
-func (t *serversTab) act(reload bool, fn func() (string, error)) tea.Cmd {
+// act runs fn in a command as the busy work key (shown as busy in the status line; nil while key
+// is already running) and reports its text or error in the status line.
+func (t *serversTab) act(m *Model, key, busy string, reload bool, fn func() (string, error)) tea.Cmd {
+	if !m.begin(key, busy) {
+		return nil
+	}
 	return func() tea.Msg {
 		text, err := fn()
-		return serverActionMsg{text: text, err: err, reload: reload && err == nil}
+		return serverActionMsg{key: key, text: text, err: err, reload: reload && err == nil}
 	}
 }
 
-func (t *serversTab) setDisabled(m *Model, tg target.Target, disabled bool, what string) tea.Cmd {
+// rulesExclude reports whether the rules alone (ignoring the server's and the tool's Disabled
+// flags) exclude the listed tool in the which folder, and that folder (with ~).
+func (t *serversTab) rulesExclude(m *Model, server, tool string) (string, bool) {
+	if t.which == nil || m.snap.Config == nil || m.snap.Config.Servers[server] == nil {
+		return "", false
+	}
+	cfg := *m.snap.Config
+	srv := *cfg.Servers[server]
+	srv.Disabled = false
+	if tc := srv.Tools[tool]; tc != nil {
+		cp := *tc
+		cp.Disabled = false
+		srv.Tools = maps.Clone(srv.Tools)
+		srv.Tools[tool] = &cp
+	}
+	cfg.Servers = maps.Clone(cfg.Servers)
+	cfg.Servers[server] = &srv
+	if gateway.ToolDecision(&cfg, server, tool, t.which.Dir).Active {
+		return "", false
+	}
+	return tildify(oneLine(t.which.Dir), m.opts.Home), true
+}
+
+// setDisabled toggles the node tg in a command; note is appended to the result text.
+func (t *serversTab) setDisabled(m *Model, tg target.Target, disabled bool, what, note string) tea.Cmd {
 	env := m.opts.Env
-	return t.act(true, func() (string, error) {
+	verb := "enabling "
+	if disabled {
+		verb = "disabling "
+	}
+	return t.act(m, tg.String(), verb+what+" …", true, func() (string, error) {
 		warns, err := actions.SetDisabled(env, tg, disabled)
-		text := "enabled " + what
+		text := "enabled " + what + note
 		if disabled {
-			text = "disabled " + what
+			text = "disabled " + what + note
 		}
 		if len(warns) > 0 {
 			text += " (" + strings.Join(warns, "; ") + ")"
@@ -451,7 +506,7 @@ func (t *serversTab) accept(m *Model, name string, s *config.Server) tea.Cmd {
 	body = append(body, "", dimStyle.Render("Rules, tools and flags stay."))
 	env := m.opts.Env
 	m.openModal(&confirmModal{title: "Accept plugin server", body: body, yes: "accept", color: cYellow, run: func(m *Model) tea.Cmd {
-		return t.act(true, func() (string, error) {
+		return t.act(m, "server:"+name, "accepting "+name+" …", true, func() (string, error) {
 			return "accepted the new plugin definition of " + name, actions.PluginServerAccept(env, name)
 		})
 	}})
@@ -459,8 +514,8 @@ func (t *serversTab) accept(m *Model, name string, s *config.Server) tea.Cmd {
 }
 
 // defDiff lists the connection fields that differ between old and new: the old value with "-",
-// the new one with "+". Old env/header values are masked unless they are secret references; the
-// new ones come from the plugin's files and are shown.
+// the new one with "+". Old env/header values are masked unless they are secret references. The
+// new ones are shown on purpose: they come from the plugin's files, and reviewing them is the point.
 func defDiff(old, new config.Server, home string) []string {
 	const lw = 10
 	var out []string
@@ -514,7 +569,7 @@ func maskValue(v string) string {
 // --- view ----------------------------------------------------------------------------------
 
 func (t *serversTab) view(m *Model, w, h int) string {
-	rows := t.resolve(m)
+	rows := t.rows(m) // view changes nothing: the selection is resolved in update
 	title := "Servers"
 	right := ""
 	if m.snap.Config != nil {
@@ -530,7 +585,7 @@ func (t *serversTab) view(m *Model, w, h int) string {
 		dtitle = oneLine(t.sel)
 	}
 	if w >= wideMin {
-		lw := min(max(w*9/20, 44), 90)
+		lw := listPaneWidth(w)
 		return hjoin(panel(title, list(lw-4, h-2), lw, h, !t.toolFocus, right),
 			panel(dtitle, t.detailLines(m, w-lw-4), w-lw, h, t.toolFocus, ""))
 	}
@@ -547,6 +602,14 @@ func (t *serversTab) view(m *Model, w, h int) string {
 	}
 	return panel(title, list(w-4, lh-2), w, lh, !t.toolFocus, right) + "\n" +
 		panel(dtitle, t.detailLines(m, w-4), w, h-lh, t.toolFocus, "")
+}
+
+// listPaneWidth is the width of the list pane on a terminal w wide (all of it below wideMin).
+func listPaneWidth(w int) int {
+	if w >= wideMin {
+		return min(max(w*9/20, 44), 90)
+	}
+	return w
 }
 
 // icon is the list icon of server name: ? needs review, ! error, ● ready, ○ otherwise.
@@ -596,7 +659,6 @@ func (t *serversTab) listLines(m *Model, rows []string, iw, ih int) []string {
 	}
 	filterLine := ""
 	if t.filtering {
-		t.filter.Width = max(iw-2, 1)
 		filterLine = t.filter.View()
 	} else if t.query != "" {
 		filterLine = accentStyle.Render("/"+oneLine(t.query)) + dimStyle.Render("  esc clears")
@@ -652,7 +714,7 @@ func (t *serversTab) rowLines(m *Model, rows []string, iw, h int) []string {
 		sessW = 0
 	}
 	var lines []string
-	for i, n := range rows {
+	for _, n := range rows {
 		s := m.snap.Config.Servers[n]
 		if s == nil {
 			continue
@@ -685,19 +747,19 @@ func (t *serversTab) rowLines(m *Model, rows []string, iw, h int) []string {
 		case room >= 6:
 			row += " " + dimStyle.Render(fit(rest+origin, room))
 		}
-		if i == t.idx {
+		if n == t.sel {
 			if !t.toolFocus {
 				row = highlightRow(row, iw)
 			} else {
-				row = selStyle.Render("›") + strings.TrimPrefix(row, " ")
+				row = selStyle.Render("▸") + strings.TrimPrefix(row, " ")
 			}
 		}
 		lines = append(lines, row)
 	}
 	if len(lines) > h {
 		start := 0
-		if t.idx >= h {
-			start = t.idx - h + 1
+		if cur := slices.Index(rows, t.sel); cur >= h {
+			start = cur - h + 1
 		}
 		lines = lines[start:min(start+h, len(lines))]
 	}
@@ -834,7 +896,7 @@ func (t *serversTab) detailLines(m *Model, dw int) []string {
 			row += "  " + dimStyle.Render(ellipsizeMiddle(oneLine(own), room))
 		}
 		if t.toolFocus && it.name == t.toolSel {
-			l = append(l, highlightRow(selStyle.Render("› ")+row, dw))
+			l = append(l, highlightRow(selStyle.Render("▸ ")+row, dw))
 		} else {
 			l = append(l, "  "+row)
 		}

@@ -8,7 +8,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/zalando/go-keyring"
 
@@ -393,14 +395,14 @@ func TestSecretLineToKeyring(t *testing.T) {
 	h.load()
 	h.key("a")
 	h.set("env", "API_KEY=s3cr3t-demo")
-	h.key("ctrl+s") // before a name is set: no secret name
+	h.key("ctrl+k") // before a name is set: no secret name
 	if f := h.form(); !strings.Contains(f.form.get("name").err, "name") {
 		t.Errorf("no name error: %q / %q", f.form.get("name").err, f.form.get("env").err)
 	}
 	h.set("name", "demo-sec")
 	h.set("command", "demo-server")
 	h.set("env", "MODE=fast\nAPI_KEY=s3cr3t-demo")
-	h.key("ctrl+s") // on the API_KEY line
+	h.key("ctrl+k") // on the API_KEY line
 	if v, err := secrets.Get("demo-sec-api_key"); err != nil || v != "s3cr3t-demo" {
 		t.Fatalf("keyring: %q, %v", v, err)
 	}
@@ -414,13 +416,13 @@ func TestSecretLineToKeyring(t *testing.T) {
 	h.key("right")
 	h.set("url", "https://demo.example/mcp")
 	h.set("headers", "X-Api+Token: tok-demo")
-	h.key("ctrl+s")
+	h.key("ctrl+k")
 	if v, err := secrets.Get("demo-sec-x-api-token"); err != nil || v != "tok-demo" {
 		t.Fatalf("header secret: %q, %v", v, err)
 	}
 	h.form().form.focusKey("type")
 	h.key("left")
-	h.form().form.focusKey("name")
+	h.form().form.focusKey("env") // ctrl+s saves from an env line too
 	h.key("ctrl+s")
 	if len(h.m.modals) != 0 {
 		t.Fatalf("form still open:\n%s", screen(h))
@@ -541,5 +543,100 @@ func TestAcceptPluginServer(t *testing.T) {
 	}
 	if v := screen(h); !strings.Contains(v, "accepted") {
 		t.Errorf("status:\n%s", v)
+	}
+}
+
+// TestBusyFeedback: work in flight shows a spinner in the status line, a repeated key does not
+// start it twice, and the result ends it.
+func TestBusyFeedback(t *testing.T) {
+	h := newHarness(t, TabServers)
+	h.writeConfig(demoConfig(1))
+	h.status = readyStatus(1, 1)
+	h.load()
+	_, cmd := h.m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+	if cmd == nil {
+		t.Fatal("no restart command")
+	}
+	if v := screen(h); !strings.Contains(v, "| restarting demo-1 …") {
+		t.Errorf("no busy status:\n%s", v)
+	}
+	h.m.Update(spinMsg{})
+	if v := screen(h); !strings.Contains(v, "/ restarting demo-1 …") {
+		t.Errorf("spinner did not advance:\n%s", v)
+	}
+	if _, again := h.m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")}); again != nil {
+		t.Error("a second restart started while the first is pending")
+	}
+	h.run(cmd)
+	if n := slices.IndexFunc(h.hellos, func(hl daemon.Hello) bool { return hl.Cmd == "restart" }); n < 0 ||
+		len(slices.DeleteFunc(slices.Clone(h.hellos), func(hl daemon.Hello) bool { return hl.Cmd != "restart" })) != 1 {
+		t.Errorf("restart requests: %+v", h.hellos)
+	}
+	if v := screen(h); strings.Contains(v, "restarting") || !strings.Contains(v, "restarted demo-1") {
+		t.Errorf("after the result:\n%s", v)
+	}
+	if h.m.spin() != nil {
+		t.Error("spinner scheduled while idle")
+	}
+	// a toggle shows its own busy text
+	_, cmd = h.m.Update(tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}})
+	if v := screen(h); !strings.Contains(v, "disabling demo-1 …") {
+		t.Errorf("no busy toggle:\n%s", v)
+	}
+	h.run(cmd)
+	if !h.config().Servers["demo-1"].Disabled {
+		t.Error("toggle not applied")
+	}
+}
+
+func TestDangerConfirmNeedsY(t *testing.T) {
+	h := newHarness(t, TabServers)
+	h.writeConfig(demoConfig(1))
+	h.load()
+	h.key("d", "enter")
+	if len(h.m.modals) != 0 || h.config().Servers["demo-1"] == nil {
+		t.Fatal("enter removed the server or kept the modal")
+	}
+}
+
+func TestToggleToolRulesNote(t *testing.T) {
+	h := newHarness(t, TabServers)
+	cfg, st, wh := demoServers(h)
+	cfg.Servers["demo-ready"].Rules = nil // only the tool's own rules decide
+	cfg.Servers["demo-ready"].Tools["search"] = &config.Tool{Rules: []rules.Rule{{Path: "/elsewhere", Mode: rules.Only}}}
+	wh.Servers[0].Tools[0].Decision = rules.Decision{Reason: "tool: no include matches"}
+	h.writeConfig(cfg)
+	h.status, h.which = st, wh
+	h.load()
+	h.m.tabs[TabServers].(*serversTab).sel = "demo-ready"
+	h.key("t", " ")
+	if v := screen(h); !strings.Contains(v, "disabled tool search of demo-ready (rules also exclude it in /work/demo)") {
+		t.Errorf("disable note:\n%s", v)
+	}
+	h.key(" ")
+	if v := screen(h); !strings.Contains(v, "enabled tool search of demo-ready, but rules exclude it in /work/demo") {
+		t.Errorf("enable note:\n%s", v)
+	}
+	h.key("j", " ") // write: excluded only by its disabled flag
+	if v := screen(h); !strings.Contains(v, "enabled tool write of demo-ready") || strings.Contains(v, "but rules") {
+		t.Errorf("plain enable:\n%s", v)
+	}
+}
+
+func TestWhichRetriedOnTick(t *testing.T) {
+	h := newHarness(t, TabServers)
+	cfg, st, wh := demoServers(h)
+	h.writeConfig(cfg)
+	h.status, h.which = st, wh
+	h.cmdErr = map[string]error{"which": fmt.Errorf("read: %w", os.ErrDeadlineExceeded)}
+	h.load()
+	h.m.tabs[TabServers].(*serversTab).sel = "demo-ready"
+	if v := screen(h); !strings.Contains(v, "tools unavailable (read: i/o timeout)") {
+		t.Errorf("which error:\n%s", v)
+	}
+	h.cmdErr = nil
+	h.tick(2 * time.Second)
+	if v := screen(h); !strings.Contains(v, "✓ search") {
+		t.Errorf("which not retried on the tick:\n%s", v)
 	}
 }
