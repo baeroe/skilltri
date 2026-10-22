@@ -62,7 +62,7 @@ Every MCP server, tool, skill source, plugin and skill can carry rules. A rule i
 
 ### Which folder is the session in?
 
-In this order: `--cwd`/`SKILLTRI_CWD` (for harnesses that need it), the single MCP root if the client sends exactly one, then the process working directory of `skilltri mcp`. Harnesses start stdio servers in the project folder; verifying this per harness is part of the spike.
+In this order: `--cwd`/`SKILLTRI_CWD` (for harnesses that need it), the single MCP root if the client sends exactly one, then the process working directory of `skilltri mcp`. Harnesses start stdio servers in the project folder; see "Spike results" for Claude Code.
 
 ## MCP gateway
 
@@ -100,7 +100,7 @@ Research result that shapes this: Claude Code and Codex load project skills from
 
 **Adapters** (one registry table, like lazyskills' agent table: id, display name, detection, delivery method, project/user dirs):
 
-1. **Claude Code (v1).** Claude Code loads extra plugin folders from `CLAUDE_CODE_PLUGIN_DIRS` (colon-separated, like `--plugin-dir`, since v2.1.280). The view contains one generated plugin per source plugin (`<plugin>/.claude-plugin/plugin.json` + `skills/`), so the original namespace survives, and one plugin named `skilltri` (configurable) for skills from `local` and `git` sources. Claude rejects symlinks that leave a plugin, so the view **copies** skill folders (or hardlinks them where possible) instead of symlinking; this is verified in the spike.
+1. **Claude Code (v1).** Claude Code loads extra plugin folders from `CLAUDE_CODE_PLUGIN_DIRS` (colon-separated, like `--plugin-dir`, since v2.1.280). The view contains one generated plugin per source plugin (`<plugin>/.claude-plugin/plugin.json` + `skills/`), so the original namespace survives, and one plugin named `skilltri` (configurable) for skills from `local` and `git` sources. The spike confirmed that symlinked skill folders inside such a plugin are loaded, so the view consists of symlinks.
 2. **`.agents/skills` harnesses (Codex, Gemini CLI, OpenCode, Cursor, Copilot CLI, Amp, …).** Where a harness has an env variable or config path for its skill folder, the adapter uses a view the same way. Where it has none, the adapter falls back to symlinks in `<session folder>/.agents/skills/skilltri-*`, adds them to `.git/info/exclude`, and removes them when they no longer apply. The TUI marks that adapter with the parent-folder caveat.
 
 **Getting the env into the harness:**
@@ -147,15 +147,12 @@ skilltri version
 2. `skilltri import claude`, set rules; then uninstall the same plugins in Claude Code and remove the imported user skills there (Doctor lists the duplicates).
 3. Register `skilltri mcp` in the harnesses instead of the 1MCP endpoint, add the shell hook, install the daemon, stop 1MCP.
 
-## Spike before the plan
+## Spike results (2026-10-22, Claude Code 2.1.308)
 
-Phase 0 of the plan, short and throwaway, with a decision point: the plan names both branches and continues with the one the spike confirms. It settles the assumptions everything else rests on:
-
-1. `CLAUDE_CODE_PLUGIN_DIRS` with a generated plugin folder: are skills found, namespaced as expected, are copied/hardlinked/symlinked skill folders accepted?
-2. Working directory and `roots` that Claude Code (and Codex) pass to a stdio MCP server.
-3. Whether Codex (and the other `.agents/skills` harnesses) can be pointed at a skill folder through env or config.
-
-If (1) fails, the Claude adapter falls back to `--add-dir <view>` through the launcher (Claude loads `.claude/skills` of added dirs) and the shell hook only covers MCP.
+1. **`CLAUDE_CODE_PLUGIN_DIRS` works.** A generated plugin folder (`<plugin>/.claude-plugin/plugin.json` with only `name`, plus `skills/`) is loaded; its skills appear as `<plugin>:<skill>`. Both a copied skill folder and a **symlink to a folder outside the plugin** are found and loaded. So the Claude view uses symlinks (no copies).
+2. **Session folder for stdio MCP servers:** Claude Code starts the server with the working directory set to the start folder, sets `PWD` and `CLAUDE_PROJECT_DIR` to it, declares the `roots` capability and answers `roots/list` with exactly that folder. Note: `tools/list` arrives **before** the `roots/list` answer, so the session starts with the working directory and switches only if the roots differ.
+3. Claude Code 2.1.308 first sends a `server/discover` probe (protocol `2026-07-28`) and then a normal `initialize` with `2025-11-25`. The gateway must answer unknown methods with "method not found" and negotiate the protocol version.
+4. Codex is not installed on the author's machine; whether Codex and the other `.agents/skills` harnesses can be redirected is verified per harness while building the adapters (plan 2). Without a redirect they use the project-folder fallback.
 
 ## Repository setup (same as tussh)
 
