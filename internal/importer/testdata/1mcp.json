@@ -1,0 +1,34 @@
+{
+  "mcpServers": {
+    "docs": {
+      "type": "http",
+      "url": "https://docs.example.com/mcp",
+      "headers": { "Authorization": "Bearer xyz" },
+      "requestTimeout": 120000
+    },
+    "browser": {
+      "command": "demo-browser-mcp",
+      "args": ["--headless"],
+      "tags": ["web"]
+    },
+    "wiki": {
+      "command": "mcp-remote",
+      "args": ["https://wiki.example.com/mcp"]
+    },
+    "legacy": {
+      "type": "sse",
+      "url": "https://legacy.example.com/sse"
+    },
+    "off": {
+      "command": "demo-off-mcp",
+      "disabled": true
+    },
+    "notes": {
+      "command": "demo-notes-mcp",
+      "env": { "NOTES_API_TOKEN": "s3cret", "NOTES_MODE": "fast" }
+    },
+    "my_tool.v2": {
+      "command": "demo-tool-mcp"
+    }
+  }
+}
