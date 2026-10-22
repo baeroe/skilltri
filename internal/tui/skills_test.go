@@ -208,6 +208,14 @@ func TestFilterIgnoresExpandOnForcedAncestors(t *testing.T) {
 	if v := screen(h); !strings.Contains(v, "▾ demo-local") || !strings.Contains(v, "demo-beta") {
 		t.Errorf("demo-local collapsed after clearing the filter:\n%s", v)
 	}
+
+	// left on a forced row still moves to its parent
+	h.key("/", "outline", "enter")
+	h.selectNode(pluginKey("demo-market", "writing"))
+	h.key("left")
+	if h.skills().sel != srcKey("demo-market") || len(h.skills().open) != 0 {
+		t.Errorf("left on a forced row: sel %q, open %v", h.skills().sel, h.skills().open)
+	}
 }
 
 // choose selects value in the choice field key of the top form.

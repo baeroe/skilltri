@@ -336,19 +336,19 @@ func (t *skillsTab) listKey(m *Model, key string) tea.Cmd {
 }
 
 // expand opens (enter toggles, right opens, left closes) the row; left on a closed or leaf row
-// moves to its parent. Rows the filter forces open ignore it (their state would flip unseen).
+// moves to its parent. Rows the filter forces open are not opened or closed (their state would flip
+// unseen); left still moves to their parent.
 func (t *skillsTab) expand(rows []treeRow, r *treeRow, key string) {
 	hasKids := len(r.node.children) > 0
 	switch {
-	case r.forced:
-	case (key == "left" || key == "h") && (!hasKids || !r.open):
+	case (key == "left" || key == "h") && (!hasKids || !r.open || r.forced):
 		for i := t.idx - 1; i >= 0; i-- {
 			if rows[i].depth < r.depth {
 				t.idx, t.sel = i, rows[i].node.key
 				return
 			}
 		}
-	case !hasKids:
+	case !hasKids, r.forced:
 	case key == "enter":
 		t.open[r.node.key] = !r.open
 	case key == "right" || key == "l":
