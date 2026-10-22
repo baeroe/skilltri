@@ -27,6 +27,9 @@ func editConfig(fn func(*config.Config) error) error {
 	return nil
 }
 
+// RefreshCatalog lets other packages refresh the catalog after editing the config.
+func RefreshCatalog() { refreshCatalog() }
+
 // refreshCatalog rebuilds and saves the catalog offline (no git) when no daemon runs; a running
 // daemon watches the config and rebuilds on its own. Failures are reported but not fatal.
 func refreshCatalog() {

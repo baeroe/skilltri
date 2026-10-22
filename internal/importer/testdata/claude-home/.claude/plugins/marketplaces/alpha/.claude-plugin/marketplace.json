@@ -1,0 +1,6 @@
+{"name": "alpha", "plugins": [
+  {"name": "on-plugin", "source": "./plugins/on-plugin"},
+  {"name": "off-plugin", "source": "./plugins/off-plugin"},
+  {"name": "proj-plugin", "source": "./plugins/proj-plugin"},
+  {"name": "missing-plugin", "source": "./plugins/missing-plugin"}
+]}

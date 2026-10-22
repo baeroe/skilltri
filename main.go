@@ -72,6 +72,8 @@ Usage:
                             choose which harnesses get project skill links
   skilltri import 1mcp [file] [--force]
                             import servers from a 1MCP mcp.json
+  skilltri import claude [--home DIR] [--force]
+                            import Claude Code marketplaces and user skills (prints manual follow-ups)
   skilltri env [dir] [--shell zsh|bash|fish]
                             print the skill variables for a folder (used by the hook)
   skilltri shell-init SHELL print the shell hook (zsh, bash, fish), for your rc file:
@@ -280,7 +282,10 @@ func readSecret(name string) (string, error) {
 }
 
 func runImport(args []string) int {
-	const usageMsg = "usage: skilltri import 1mcp [file] [--force]\n"
+	const usageMsg = "usage: skilltri import 1mcp [file] [--force] | claude [--home DIR] [--force]\n"
+	if len(args) > 0 && args[0] == "claude" {
+		return runImportClaude(args[1:], usageMsg)
+	}
 	if len(args) == 0 || args[0] != "1mcp" {
 		fmt.Fprint(os.Stderr, usageMsg)
 		return 2
@@ -317,6 +322,42 @@ func runImport(args []string) int {
 	}
 
 	return importInto(paths.ConfigFile(), res, force, os.Stdout, os.Stderr)
+}
+
+// runImportClaude implements `skilltri import claude [--home DIR] [--force]`.
+func runImportClaude(args []string, usageMsg string) int {
+	force, home := false, ""
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--force":
+			force = true
+		case args[i] == "--home" && i+1 < len(args) && home == "":
+			i++
+			home = args[i]
+		default:
+			fmt.Fprint(os.Stderr, usageMsg)
+			return 2
+		}
+	}
+	if home == "" {
+		h, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "skilltri: %v\n", err)
+			return 1
+		}
+		home = h
+	}
+	res, err := importer.FromClaude(home)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "skilltri: %v\n", err)
+		return 1
+	}
+	if err := importer.ApplyClaude(paths.ConfigFile(), filepath.Join(paths.ConfigDir(), "skills"), res, force, os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "skilltri: %v\n", err)
+		return 1
+	}
+	cli.RefreshCatalog()
+	return 0
 }
 
 // runStatus implements `skilltri status [--json]`.

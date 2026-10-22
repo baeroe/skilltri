@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "plugins": {
+    "on-plugin@alpha": [{"scope": "user", "installPath": "/x", "version": "1.0.0"}],
+    "off-plugin@alpha": [{"scope": "user", "installPath": "/x", "version": "1.0.0"}],
+    "proj-plugin@alpha": [{"scope": "project", "installPath": "/x", "version": "1.0.0"}],
+    "beta-tool@beta.local": [{"scope": "user", "installPath": "/x", "version": "1.0.0"}]
+  }
+}
