@@ -76,9 +76,11 @@ func Path() string { return filepath.Join(paths.CacheDir(), "catalog.json") }
 
 // Build builds the catalog of cfg. With sync=false it reads only existing checkouts and never runs git.
 // With sync=true it first syncs the git and marketplace sources (and remote plugins) that are due:
-// never fetched, or fetched longer than the source's interval ago (interval 0 = manual only).
+// never fetched, without a checkout (e.g. a failed first clone), or fetched longer than the
+// source's interval ago (interval 0 = manual only).
 // A failing source never fails the build: its error goes into SourceState.Error and its last
-// good checkout stays in use. The lock (commit, error, skill hashes) is written for synced sources.
+// good checkout stays in use. The lock (commit, error, skill hashes) is written for synced sources;
+// an unreadable or unwritable lock only adds a warning. Build currently never returns an error.
 func (b *Builder) Build(ctx context.Context, cfg *config.Config, sync bool) (*Catalog, error) {
 	lock, warn := b.loadLock()
 	var synced map[string]SourceState
@@ -92,7 +94,7 @@ func (b *Builder) Build(ctx context.Context, cfg *config.Config, sync bool) (*Ca
 	if len(synced) > 0 {
 		recordHashes(lock, c, keys, synced)
 		if err := skilllock.Save(b.lockPath(), lock); err != nil {
-			return nil, err
+			c.Warnings = append(c.Warnings, "save skill lock: "+err.Error())
 		}
 	}
 	return c, nil
@@ -101,18 +103,26 @@ func (b *Builder) Build(ctx context.Context, cfg *config.Config, sync bool) (*Ca
 // SyncSources syncs exactly the sources named in only (and their remote plugins), or every due one
 // when only is empty, and records the result in the lock. It returns the state of every key it
 // attempted, sorted by name; an unknown or disabled name in only comes back with an error.
+// Problems with the lock itself (unreadable, unwritable) are appended to the error of every state.
 func (b *Builder) SyncSources(ctx context.Context, cfg *config.Config, only []string) []SourceState {
-	lock, _ := b.loadLock()
+	lock, warn := b.loadLock()
+	var lockErrs []string
+	if warn != "" {
+		lockErrs = append(lockErrs, warn)
+	}
 	synced := b.sync(ctx, cfg, lock, only)
 	if len(synced) > 0 {
 		c, keys := b.assemble(cfg, lock)
 		recordHashes(lock, c, keys, synced)
 		if err := skilllock.Save(b.lockPath(), lock); err != nil {
-			for k, st := range synced {
-				st.Error = strings.TrimPrefix(st.Error+"; ", "; ") + "save lock: " + err.Error()
-				synced[k] = st
-			}
+			lockErrs = append(lockErrs, "save skill lock: "+err.Error())
 		}
+	}
+	for k, st := range synced {
+		for _, e := range lockErrs {
+			st.Error = strings.TrimPrefix(st.Error+"; ", "; ") + e
+		}
+		synced[k] = st
 	}
 	for _, n := range only {
 		if _, ok := synced[n]; ok {
@@ -166,8 +176,8 @@ func (b *Builder) sync(ctx context.Context, cfg *config.Config, lock *skilllock.
 		if err != nil {
 			interval = 0
 		}
-		due := func(key string) bool {
-			if listed[name] {
+		due := func(key string) bool { // listed, never fetched, without a checkout, or the interval passed
+			if listed[name] || !hasCheckout(b.Fetcher.Dir(key)) {
 				return true
 			}
 			e, ok := lock.Sources[key]
@@ -248,11 +258,15 @@ func (b *Builder) assemble(cfg *config.Config, lock *skilllock.Lock) (*Catalog, 
 	owner := map[string]string{}
 	keys := map[string]string{}
 	add := func(source, key, plugin, id string, s skills.Skill) {
+		from := source // "<source>" or, for plugin skills, "<source>/<entry>"
+		if plugin != "" {
+			from += "/" + plugin
+		}
 		if first, ok := owner[id]; ok {
-			c.Warnings = append(c.Warnings, fmt.Sprintf("skill %s from %s hidden by %s", id, source, first))
+			c.Warnings = append(c.Warnings, fmt.Sprintf("skill %s from %s hidden by %s", id, from, first))
 			return
 		}
-		owner[id], keys[id] = source, key
+		owner[id], keys[id] = from, key
 		c.Skills = append(c.Skills, Entry{ID: id, Source: source, Plugin: plugin, Skill: s})
 	}
 	state := func(key string) SourceState {

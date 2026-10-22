@@ -1,6 +1,8 @@
 package catalog
 
 import (
+	"sort"
+
 	"github.com/baeroe/skilltri/internal/config"
 	"github.com/baeroe/skilltri/internal/rules"
 )
@@ -34,12 +36,14 @@ func Levels(cfg *config.Config, e Entry) []rules.Level {
 	return append(levels, l)
 }
 
-// Evaluate decides every catalog entry for dir (already normalized, see rules.Normalize), sorted by ID.
+// Evaluate decides every catalog entry for dir (already normalized, see rules.Normalize), sorted by ID
+// (also for a catalog that is not sorted; c itself is not modified).
 func Evaluate(c *Catalog, cfg *config.Config, dir string) []Decided {
 	out := make([]Decided, 0, len(c.Skills))
-	for _, e := range c.Skills { // Skills is sorted by ID
+	for _, e := range c.Skills {
 		out = append(out, Decided{Entry: e, Decision: rules.Evaluate(Levels(cfg, e), dir)})
 	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Entry.ID < out[j].Entry.ID })
 	return out
 }
 

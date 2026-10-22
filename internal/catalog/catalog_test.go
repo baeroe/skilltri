@@ -487,3 +487,71 @@ func TestSaveLoad(t *testing.T) {
 		t.Fatalf("mode = %v", st.Mode().Perm())
 	}
 }
+
+func TestFailedFirstFetchRetried(t *testing.T) {
+	f := newFixture(t)
+	good := f.cfg.Sources["repo"].URL
+	f.cfg.Sources["repo"].URL = "file://" + filepath.Join(t.TempDir(), "missing")
+	c := build(t, f.builder, f.cfg, true)
+	if slices.Contains(ids(c), "beta") {
+		t.Fatal("beta without a checkout")
+	}
+	f.cfg.Sources["repo"].URL = good
+	c = build(t, f.builder, f.cfg, true) // within the interval, but there is no checkout yet
+	if !slices.Contains(ids(c), "beta") {
+		t.Fatalf("failed first fetch not retried: %v %+v", ids(c), c.Sources)
+	}
+}
+
+func TestPluginNameCollision(t *testing.T) {
+	f := newFixture(t)
+	write(t, filepath.Join(f.market, ".claude-plugin", "marketplace.json"), `{"name": "demo-market", "plugins": [
+    { "name": "writing", "source": "./plugins/writing" },
+    { "name": "writing-copy", "source": "./plugins/writing" }
+  ]}`)
+	for i := 0; i < 3; i++ {
+		c := build(t, f.builder, f.cfg, false)
+		i := slices.IndexFunc(c.Skills, func(e Entry) bool { return e.ID == "writing-tools:outline" })
+		if i < 0 || c.Skills[i].Plugin != "writing" {
+			t.Fatalf("skills = %+v", c.Skills)
+		}
+		want := "skill writing-tools:outline from market/writing-copy hidden by market/writing"
+		if !slices.Contains(c.Warnings, want) {
+			t.Fatalf("warnings = %q, want %q", c.Warnings, want)
+		}
+	}
+}
+
+func TestLockProblemsAreWarnings(t *testing.T) {
+	f := newFixture(t)
+	write(t, f.builder.Lock, "not json")
+	c := build(t, f.builder, f.cfg, false)
+	if !slices.ContainsFunc(c.Warnings, func(w string) bool { return strings.HasPrefix(w, "skill lock ignored") }) {
+		t.Fatalf("corrupt lock not reported: %q", c.Warnings)
+	}
+
+	blocker := filepath.Join(t.TempDir(), "file")
+	write(t, blocker, "x")
+	f.builder.Lock = filepath.Join(blocker, "skills.lock") // cannot be read or written
+	c, err := f.builder.Build(context.Background(), f.cfg, true)
+	if err != nil || c == nil {
+		t.Fatalf("Build = %v, %v", c, err)
+	}
+	if !slices.Contains(ids(c), "beta") || !slices.ContainsFunc(c.Warnings, func(w string) bool { return strings.HasPrefix(w, "save skill lock") }) {
+		t.Fatalf("ids %v, warnings %q", ids(c), c.Warnings)
+	}
+	for _, st := range f.builder.SyncSources(context.Background(), f.cfg, []string{"repo"}) {
+		if !strings.Contains(st.Error, "skill lock ignored") || !strings.Contains(st.Error, "save skill lock") {
+			t.Fatalf("state %+v", st)
+		}
+	}
+}
+
+func TestEvaluateSortsUnsortedCatalog(t *testing.T) {
+	cfg := &config.Config{Version: 1, Sources: map[string]*config.Source{"loc": {Type: "local", Path: "/x"}}}
+	c := &Catalog{Skills: []Entry{{ID: "b", Source: "loc"}, {ID: "a", Source: "loc"}}}
+	got := Evaluate(c, cfg, "/")
+	if got[0].Entry.ID != "a" || got[1].Entry.ID != "b" || c.Skills[0].ID != "b" {
+		t.Fatalf("got %+v, catalog %+v", got, c.Skills)
+	}
+}
