@@ -351,7 +351,7 @@ func (t *previewTab) listKey(m *Model, key string) tea.Cmd {
 	case "c":
 		return t.copyEnv(m)
 	case "enter":
-		t.jump(m)
+		return t.jump(m)
 	}
 	return nil
 }
@@ -386,11 +386,11 @@ func (t *previewTab) copyEnv(m *Model) tea.Cmd {
 	})
 }
 
-// jump opens the selected item in its tab.
-func (t *previewTab) jump(m *Model) {
+// jump opens the selected item in its tab and returns that tab's activation command.
+func (t *previewTab) jump(m *Model) tea.Cmd {
 	r := t.selected()
 	if r == nil {
-		return
+		return nil
 	}
 	switch r.kind {
 	case pvServer, pvTool:
@@ -399,17 +399,16 @@ func (t *previewTab) jump(m *Model) {
 			name = r.server
 		}
 		if m.tabs[TabServers].(*serversTab).selectServer(m, name) {
-			m.switchTab(TabServers)
-			return
+			return m.switchTab(TabServers)
 		}
 		m.flash("server "+oneLine(name)+" is not in the config", true)
 	case pvSkill:
 		if m.tabs[TabSkills].(*skillsTab).selectSkill(m, r.skill.Source, r.skill.Plugin, r.skill.ID) {
-			m.switchTab(TabSkills)
-			return
+			return m.switchTab(TabSkills)
 		}
 		m.flash("skill "+oneLine(r.skill.ID)+" is not in the catalog", true)
 	}
+	return nil
 }
 
 // --- view ----------------------------------------------------------------------------------
