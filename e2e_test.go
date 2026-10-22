@@ -447,3 +447,117 @@ func TestDaemonEnvironmentAndStop(t *testing.T) {
 		t.Fatalf("second daemon stop: %v: %s", err, out)
 	}
 }
+
+// TestHookCommands runs `skilltri env`, `shell-init` and `run` as the shell hook and the launcher do.
+func TestHookCommands(t *testing.T) {
+	sb := newSandbox(t)
+	var env []string
+	for _, kv := range sb.env {
+		if !strings.HasPrefix(kv, "CLAUDE_CODE_PLUGIN_DIRS=") {
+			env = append(env, kv)
+		}
+	}
+	src := filepath.Join(t.TempDir(), "skills")
+	if err := os.MkdirAll(filepath.Join(src, "alpha"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "alpha", "SKILL.md"), []byte("---\nname: alpha\ndescription: Demo.\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sb.writeConfig(t, &config.Config{Version: 1, Servers: map[string]*config.Server{}, Sources: map[string]*config.Source{
+		"demo": {Type: "local", Path: src},
+	}})
+	work := t.TempDir()
+	cmd := func(dir string, extra []string, args ...string) (stdout, stderr string, code int) {
+		c := exec.Command(skilltriBin, args...)
+		c.Dir = dir
+		c.Env = append(append([]string(nil), env...), extra...)
+		var o, e strings.Builder
+		c.Stdout, c.Stderr = &o, &e
+		err := c.Run()
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			code = exit.ExitCode()
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		return o.String(), e.String(), code
+	}
+	bashParses := func(script string) {
+		t.Helper()
+		if out, err := exec.Command("bash", "-n", "-c", script).CombinedOutput(); err != nil {
+			t.Fatalf("bash rejects %q: %v\n%s", script, err, out)
+		}
+	}
+
+	out, _, code := cmd(work, nil, "env", "--shell", "bash")
+	if code != 0 || !strings.Contains(out, "export CLAUDE_CODE_PLUGIN_DIRS='") || !strings.Contains(out, "export SKILLTRI_SKILLS_NATIVE='claude-code'") {
+		t.Fatalf("env: %d %q", code, out)
+	}
+	bashParses(out)
+	if _, _, code := cmd(work, nil, "env", "--shell", "tcsh"); code != 2 {
+		t.Fatalf("bad shell exit %d", code)
+	}
+
+	// a folder deleted while the shell is in it: exit 0, only valid shell on stdout
+	gone := filepath.Join(t.TempDir(), "gone")
+	if err := os.Mkdir(gone, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c := exec.Command("bash", "-c", `cd "$1" && rmdir "$1" && exec "$2" env --shell bash`, "_", gone, skilltriBin)
+	c.Env = env
+	b, err := c.Output()
+	if err != nil || strings.Contains(string(b), "export CLAUDE_CODE_PLUGIN_DIRS=") || !strings.Contains(string(b), "unset CLAUDE_CODE_PLUGIN_DIRS") {
+		t.Fatalf("deleted folder: %q, %v", b, err)
+	}
+	bashParses(string(b))
+
+	// a broken config: exit 0, the note only on stderr
+	sb.writeConfigRaw(t, "{")
+	out, errOut, code := cmd(work, []string{"CLAUDE_CODE_PLUGIN_DIRS=/mine"}, "env", "--shell", "bash")
+	if code != 0 || strings.Contains(out, "config") || !strings.Contains(errOut, "config") || !strings.Contains(out, "export CLAUDE_CODE_PLUGIN_DIRS='/mine'") {
+		t.Fatalf("broken config: %d %q %q", code, out, errOut)
+	}
+	bashParses(out)
+	sb.writeConfig(t, &config.Config{Version: 1, Servers: map[string]*config.Server{}, Sources: map[string]*config.Source{
+		"demo": {Type: "local", Path: src},
+	}})
+
+	if out, _, code := cmd(work, nil, "shell-init", "zsh"); code != 0 || !strings.Contains(out, "chpwd_functions") {
+		t.Fatalf("shell-init zsh: %d %q", code, out)
+	}
+	if _, _, code := cmd(work, nil, "shell-init", "tcsh"); code != 2 {
+		t.Fatalf("shell-init tcsh exit %d", code)
+	}
+
+	// run: unknown harness, harness not on PATH, then a fake harness that prints its env and args
+	if _, errOut, code := cmd(work, nil, "run", "nope"); code != 2 || !strings.Contains(errOut, "codex") {
+		t.Fatalf("run nope: %d %q", code, errOut)
+	}
+	bin := t.TempDir()
+	if _, errOut, code := cmd(work, []string{"PATH=" + bin}, "run", "codex"); code != 127 || !strings.Contains(errOut, "codex") {
+		t.Fatalf("run without codex: %d %q", code, errOut)
+	}
+	fake := "#!/bin/sh\nprintf '%s\\n' \"$@\"\necho \"dirs=$CLAUDE_CODE_PLUGIN_DIRS\"\necho \"native=$SKILLTRI_SKILLS_NATIVE\"\necho \"keep=$DEMO_KEEP\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(fake), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, errOut, code = cmd(work, []string{"PATH=" + bin + ":/usr/bin:/bin", "DEMO_KEEP=yes", "SKILLTRI_SKILLS_NATIVE=stale"}, "run", "claude-code", "a b", "--flag")
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if code != 0 || len(lines) != 5 || lines[0] != "a b" || lines[1] != "--flag" ||
+		!strings.HasPrefix(lines[2], "dirs=") || !strings.HasSuffix(lines[2], "/claude/skilltri") ||
+		lines[3] != "native=claude-code" || lines[4] != "keep=yes" {
+		t.Fatalf("run claude-code: %d %q %q", code, out, errOut)
+	}
+}
+
+func (sb *sandbox) writeConfigRaw(t *testing.T, content string) {
+	t.Helper()
+	for _, kv := range sb.env {
+		if v, ok := strings.CutPrefix(kv, "SKILLTRI_CONFIG_DIR="); ok {
+			if err := os.WriteFile(filepath.Join(v, "config.json"), []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}

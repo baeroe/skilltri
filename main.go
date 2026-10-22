@@ -8,16 +8,20 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 
 	"golang.org/x/term"
 
+	"github.com/baeroe/skilltri/internal/adapters"
 	"github.com/baeroe/skilltri/internal/cli"
 	"github.com/baeroe/skilltri/internal/daemon"
 	"github.com/baeroe/skilltri/internal/gateway"
+	"github.com/baeroe/skilltri/internal/hook"
 	"github.com/baeroe/skilltri/internal/importer"
 	"github.com/baeroe/skilltri/internal/paths"
 	"github.com/baeroe/skilltri/internal/secrets"
@@ -42,6 +46,12 @@ Usage:
                             show which servers and tools a session in dir gets
   skilltri import 1mcp [file] [--force]
                             import servers from a 1MCP mcp.json
+  skilltri env [dir] [--shell zsh|bash|fish]
+                            print the skill variables for a folder (used by the hook)
+  skilltri shell-init SHELL print the shell hook (zsh, bash, fish), for your rc file:
+                            eval "$(skilltri shell-init zsh)"
+  skilltri run HARNESS [args...]
+                            start a harness with the skills of the working directory
   skilltri secret set NAME  store a secret in the keyring
   skilltri secret delete NAME
   skilltri version
@@ -79,6 +89,12 @@ func run(args []string) int {
 		return runImport(args[1:])
 	case "secret":
 		return runSecret(args[1:])
+	case "env":
+		return runEnv(args[1:], os.Stdout, os.Stderr)
+	case "shell-init":
+		return runShellInit(args[1:])
+	case "run":
+		return runHarness(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "skilltri: unknown command %q\n\n%s", cmd, usage)
 		return 2
@@ -312,4 +328,130 @@ func runService(action string) int {
 		fmt.Println("daemon service stopped and removed")
 	}
 	return 0
+}
+
+// runEnv implements `skilltri env [dir] [--shell zsh|bash|fish]`: stdout gets only shell
+// statements (written at once), notes go to stderr. Any problem with the folder, config or catalog
+// still exits 0 with "no skill env". The shell defaults to $SKILLTRI_HOOK, else the zsh/bash form.
+func runEnv(args []string, stdout, stderr io.Writer) int {
+	const usageMsg = "usage: skilltri env [dir] [--shell zsh|bash|fish]\n"
+	shell, dir := "", ""
+	for i := 0; i < len(args); i++ {
+		switch a := args[i]; {
+		case a == "--shell" && i+1 < len(args):
+			i++
+			shell = args[i]
+		case strings.HasPrefix(a, "--shell="):
+			shell = strings.TrimPrefix(a, "--shell=")
+		case dir == "" && !strings.HasPrefix(a, "-"):
+			dir = a
+		default:
+			fmt.Fprint(stderr, usageMsg)
+			return 2
+		}
+	}
+	if shell == "" {
+		if _, err := hook.Init(os.Getenv("SKILLTRI_HOOK")); err == nil {
+			shell = os.Getenv("SKILLTRI_HOOK")
+		}
+	} else if _, err := hook.Init(shell); err != nil {
+		fmt.Fprint(stderr, usageMsg)
+		return 2
+	}
+	if dir == "" {
+		dir = workDir()
+	}
+	e := hook.Compute(dir, os.Environ())
+	for _, n := range e.Notes {
+		fmt.Fprintf(stderr, "skilltri env: %s\n", n)
+	}
+	io.WriteString(stdout, hook.Render(e, shell))
+	return 0
+}
+
+// workDir is the working directory, or $PWD when it cannot be determined (for example because the
+// folder was deleted while the shell was in it).
+func workDir() string {
+	if wd, err := os.Getwd(); err == nil {
+		return wd
+	}
+	return os.Getenv("PWD")
+}
+
+// runShellInit implements `skilltri shell-init SHELL`.
+func runShellInit(args []string) int {
+	if len(args) != 1 {
+		fmt.Fprint(os.Stderr, "usage: skilltri shell-init zsh|bash|fish\n")
+		return 2
+	}
+	s, err := hook.Init(args[0])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "skilltri: %v\n", err)
+		return 2
+	}
+	fmt.Print(s)
+	return 0
+}
+
+// runHarness implements `skilltri run HARNESS [args...]`: it computes the skill env of the working
+// directory and execs the harness binary (claude for claude-code, else the adapter id) with it,
+// passing args through unchanged.
+func runHarness(args []string) int {
+	var ids []string
+	for _, a := range adapters.Registry {
+		ids = append(ids, a.ID)
+	}
+	if len(args) == 0 {
+		fmt.Fprintf(os.Stderr, "usage: skilltri run HARNESS [args...] (HARNESS: %s)\n", strings.Join(ids, ", "))
+		return 2
+	}
+	a, ok := adapters.ByID(args[0])
+	if !ok {
+		fmt.Fprintf(os.Stderr, "skilltri run: unknown harness %q (known: %s)\n", args[0], strings.Join(ids, ", "))
+		return 2
+	}
+	bin := a.ID
+	if a.ID == "claude-code" {
+		bin = "claude"
+	}
+	path, err := exec.LookPath(bin)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "skilltri run: %s not found on PATH\n", bin)
+		return 127
+	}
+	e := hook.Compute(workDir(), os.Environ())
+	for _, n := range e.Notes {
+		fmt.Fprintf(os.Stderr, "skilltri run: %s\n", n)
+	}
+	argv := append([]string{bin}, args[1:]...)
+	err = syscall.Exec(path, argv, mergeEnv(os.Environ(), e))
+	fmt.Fprintf(os.Stderr, "skilltri run: exec %s: %v\n", path, err)
+	return 126
+}
+
+// mergeEnv applies e to environ: unset variables are dropped, set ones replace or add an entry.
+func mergeEnv(environ []string, e hook.Env) []string {
+	drop := map[string]bool{}
+	for _, k := range e.Unset {
+		drop[k] = true
+	}
+	for k := range e.Set {
+		drop[k] = true
+	}
+	out := make([]string, 0, len(environ)+len(e.Set))
+	for _, kv := range environ {
+		k, _, _ := strings.Cut(kv, "=")
+		if !drop[k] {
+			out = append(out, kv)
+		}
+	}
+	keys := make([]string, 0, len(e.Set))
+	for k := range e.Set {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		out = append(out, k+"="+e.Set[k])
+	}
+	return out
 }
