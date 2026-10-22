@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"time"
 
 	"github.com/baeroe/skilltri/internal/adapters"
 	"github.com/baeroe/skilltri/internal/catalog"
@@ -28,12 +30,68 @@ const (
 	NativeVar     = "SKILLTRI_SKILLS_NATIVE"                // comma list of adapters that delivered natively
 )
 
-// Env is the change to apply to a shell or process environment. Notes are problems for stderr,
-// never for stdout.
+// Shell variables (Env.Local) the hook checks before each prompt with shell builtins only.
+const (
+	ViewVar    = "_SKILLTRI_VIEW"    // a Claude view dir in use; re-run when it is gone
+	StampVar   = "_SKILLTRI_STAMP"   // this shell's stamp, touched by every `skilltri env` run
+	ConfigVar  = "_SKILLTRI_CONFIG"  // config.json; re-run when newer than the stamp
+	CatalogVar = "_SKILLTRI_CATALOG" // catalog.json; re-run when newer than the stamp
+)
+
+// stampMaxAge is how long an untouched stamp of another shell is kept.
+const stampMaxAge = 7 * 24 * time.Hour
+
+// Env is the change to apply to a shell or process environment. Local holds shell-only variables
+// for the hook ("" = unset), never exported and ignored by `skilltri run`. Notes are problems for
+// stderr, never for stdout.
 type Env struct {
 	Set   map[string]string
 	Unset []string
+	Local map[string]string
 	Notes []string
+}
+
+var stampID = regexp.MustCompile(`^[0-9]{1,10}$`)
+
+// Stamp touches the stamp of the shell with process id id (CacheDir/hook/<id>.stamp) and records
+// it, the config and the catalog path in e.Local, so the hook can tell with `-nt` whether either
+// changed since this run. Creating a new stamp removes stamps untouched for a week (shells that are
+// gone; a live one only re-runs once). On error e.Local[StampVar] is unset, which turns the
+// prompt check off.
+func Stamp(e *Env, id string) error {
+	if e.Local == nil {
+		e.Local = map[string]string{}
+	}
+	e.Local[StampVar] = ""
+	if !stampID.MatchString(id) {
+		return fmt.Errorf("invalid shell id %q", id)
+	}
+	dir := filepath.Join(paths.CacheDir(), "hook")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, id+".stamp")
+	now := time.Now()
+	if err := os.Chtimes(path, now, now); errors.Is(err, os.ErrNotExist) {
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			return err
+		}
+		gcStamps(dir, now)
+	} else if err != nil {
+		return err
+	}
+	e.Local[StampVar], e.Local[ConfigVar], e.Local[CatalogVar] = path, paths.ConfigFile(), catalog.Path()
+	return nil
+}
+
+// gcStamps removes the stamps in dir untouched for stampMaxAge.
+func gcStamps(dir string, now time.Time) {
+	old, _ := filepath.Glob(filepath.Join(dir, "*.stamp"))
+	for _, p := range old {
+		if st, err := os.Stat(p); err == nil && now.Sub(st.ModTime()) > stampMaxAge {
+			_ = os.Remove(p)
+		}
+	}
 }
 
 // Compute returns the skill environment of dir. environ (KEY=value, later entries win) supplies the
@@ -50,10 +108,13 @@ func Compute(dir string, environ []string) Env {
 	if !seen {
 		base = vars[PluginDirsVar]
 	}
-	e := Env{Set: map[string]string{BaseVar: base}}
+	e := Env{Set: map[string]string{BaseVar: base}, Local: map[string]string{ViewVar: ""}}
 
 	dirs, native, notes := compute(dir)
 	e.Notes = notes
+	if len(dirs) > 0 {
+		e.Local[ViewVar] = dirs[0]
+	}
 
 	plugin := dirs
 	if base != "" {

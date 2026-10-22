@@ -528,6 +528,16 @@ func TestHookCommands(t *testing.T) {
 		t.Fatalf("env: %d %q", code, out)
 	}
 	bashParses(out)
+	if strings.Contains(out, "_SKILLTRI_STAMP") || !strings.Contains(out, "_SKILLTRI_VIEW='") {
+		t.Fatalf("env without the hook: %q", out)
+	}
+	// called by the hook: a stamp and the files to watch
+	out, _, code = cmd(work, []string{"SKILLTRI_HOOK_PID=4242"}, "env", "--shell", "bash")
+	if code != 0 || !strings.Contains(out, "_SKILLTRI_STAMP='") || !strings.Contains(out, "4242.stamp'") ||
+		!strings.Contains(out, "_SKILLTRI_CONFIG='") || !strings.Contains(out, "_SKILLTRI_CATALOG='") || strings.Contains(out, "export _SKILLTRI") {
+		t.Fatalf("env from the hook: %d %q", code, out)
+	}
+	bashParses(out)
 	if _, _, code := cmd(work, nil, "env", "--shell", "tcsh"); code != 2 {
 		t.Fatalf("bad shell exit %d", code)
 	}

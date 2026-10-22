@@ -498,3 +498,124 @@ func TestComputeFast(t *testing.T) {
 		t.Fatalf("Compute with a cached catalog of 200 skills took %v, limit %v", best, limit)
 	}
 }
+
+func TestStampAndWatchVars(t *testing.T) {
+	f := newFixture(t)
+	e := Compute(f.p, nil)
+	if e.Local[ViewVar] == "" || e.Local[ViewVar] != e.Set[PluginDirsVar] {
+		t.Fatalf("view var = %q, plugin dirs %q", e.Local[ViewVar], e.Set[PluginDirsVar])
+	}
+	if e := Compute(f.x, nil); e.Local[ViewVar] != "" { // no skills in X: no view to watch
+		t.Fatalf("view var without skills = %q", e.Local[ViewVar])
+	}
+
+	stamps := filepath.Join(os.Getenv("SKILLTRI_CACHE_DIR"), "hook")
+	old, recent := filepath.Join(stamps, "1.stamp"), filepath.Join(stamps, "2.stamp")
+	for _, p := range []string{old, recent} {
+		writeJSON(t, p, nil)
+	}
+	month := time.Now().Add(-30 * 24 * time.Hour)
+	if err := os.Chtimes(old, month, month); err != nil {
+		t.Fatal(err)
+	}
+	if err := Stamp(&e, "4242"); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(stamps, "4242.stamp")
+	if st, err := os.Stat(want); err != nil || time.Since(st.ModTime()) > time.Minute {
+		t.Fatalf("stamp: %v %v", st, err)
+	}
+	if e.Local[StampVar] != want || e.Local[ConfigVar] != filepath.Join(f.home, ".config/skilltri/config.json") ||
+		e.Local[CatalogVar] != catalog.Path() {
+		t.Fatalf("local = %v", e.Local)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Errorf("month-old stamp kept: %v", err)
+	}
+	if _, err := os.Stat(recent); err != nil {
+		t.Errorf("recent stamp removed: %v", err)
+	}
+	for _, bad := range []string{"", "../x", "12a", "12345678901"} {
+		e := Env{Local: map[string]string{StampVar: "stale"}}
+		if err := Stamp(&e, bad); err == nil || e.Local[StampVar] != "" {
+			t.Errorf("Stamp(%q) = %v, local %v", bad, err, e.Local)
+		}
+	}
+}
+
+func TestRenderLocal(t *testing.T) {
+	e := Env{Set: map[string]string{"A": "1"}, Local: map[string]string{"_L": "it's", "_GONE": ""}}
+	if got, want := Render(e, "zsh"), "export A='1'\nunset _GONE\n_L='it'\\''s'\n"; got != want {
+		t.Fatalf("zsh:\n%s\nwant\n%s", got, want)
+	}
+	if got, want := Render(e, "fish"), "set -gx A '1'\nset -e _GONE\nset -g _L 'it\\'s'\n"; got != want {
+		t.Fatalf("fish:\n%s\nwant\n%s", got, want)
+	}
+	for _, sh := range []string{"bash", "zsh"} { // set, not exported
+		bin, err := exec.LookPath(sh)
+		if err != nil {
+			continue
+		}
+		out, err := exec.Command(bin, "-c", Render(e, sh)+"\nprintf '%s|' \"$_L\"; env | grep -c '^_L=' || true").CombinedOutput()
+		if err != nil || strings.TrimSpace(string(out)) != "it's|0" {
+			t.Fatalf("%s: %q, %v", sh, out, err)
+		}
+	}
+}
+
+// TestInitHookRerunsOnChange sources the bash and zsh hooks with a fake skilltri that logs each
+// call and prints the watch variables, then runs prompts: nothing changed → no call; a newer
+// config, a newer catalog or a missing view → one call each.
+func TestInitHookRerunsOnChange(t *testing.T) {
+	bin, work := t.TempDir(), rules.Normalize(t.TempDir())
+	cfg, cat, view := filepath.Join(work, "config.json"), filepath.Join(work, "catalog.json"), filepath.Join(work, "view")
+	fake := `#!/bin/sh
+echo "$SKILLTRI_HOOK_PID" >> "$DEMO_LOG"
+mkdir -p "$DEMO_VIEW"
+touch "$DEMO_STAMP"
+echo "_SKILLTRI_STAMP='$DEMO_STAMP'"
+echo "_SKILLTRI_CONFIG='$DEMO_CONFIG'"
+echo "_SKILLTRI_CATALOG='$DEMO_CATALOG'"
+echo "_SKILLTRI_VIEW='$DEMO_VIEW'"
+`
+	if err := os.WriteFile(filepath.Join(bin, "skilltri"), []byte(fake), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, sh := range []string{"bash", "zsh"} {
+		path, err := exec.LookPath(sh)
+		if err != nil {
+			continue
+		}
+		s, err := Init(sh)
+		if err != nil {
+			t.Fatal(err)
+		}
+		log := filepath.Join(work, sh+".log")
+		prompt := `for f in $precmd_functions; do $f; done` // what zsh runs before a prompt
+		if sh == "bash" {
+			prompt = `eval "$PROMPT_COMMAND"`
+		}
+		past, future := "touch -t 201901010000 ", "touch -t 203001010000 "
+		script := "set -u\n" + past + cfg + " " + cat + "\n" + s + "\n" + prompt + "\n" + prompt + "\n" + // initial call only
+			future + cfg + "\n" + prompt + "\n" + past + cfg + "\n" + prompt + "\n" + // config changed: one call
+			future + cat + "\n" + prompt + "\n" + past + cat + "\n" + prompt + "\n" + // catalog changed: one call
+			"rm -rf " + view + "\n" + prompt + "\n" + prompt + "\n" + // view gone: one call
+			"echo \"exit=$?\"\n"
+		cmd := exec.Command(path, "-c", script)
+		cmd.Dir = work
+		cmd.Env = append(os.Environ(), "PATH="+bin+":/usr/bin:/bin", "DEMO_LOG="+log, "DEMO_STAMP="+filepath.Join(work, sh+".stamp"),
+			"DEMO_CONFIG="+cfg, "DEMO_CATALOG="+cat, "DEMO_VIEW="+view)
+		out, err := cmd.CombinedOutput()
+		if err != nil || !strings.Contains(string(out), "exit=0") {
+			t.Fatalf("%s: %v\n%s", sh, err, out)
+		}
+		b, _ := os.ReadFile(log)
+		calls := strings.Fields(string(b))
+		if len(calls) != 4 {
+			t.Fatalf("%s: %d calls, want 4 (initial, config, catalog, view): %q", sh, len(calls), b)
+		}
+		if calls[0] == "" || calls[0] != calls[3] {
+			t.Errorf("%s: shell pid not passed: %q", sh, calls)
+		}
+	}
+}

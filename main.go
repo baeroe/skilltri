@@ -663,6 +663,11 @@ func runEnv(args []string, stdout, stderr io.Writer) int {
 		dir = workDir()
 	}
 	e := hook.Compute(dir, os.Environ())
+	if id := os.Getenv(hook.StampPIDVar); id != "" { // called by the shell hook
+		if err := hook.Stamp(&e, id); err != nil {
+			e.Notes = append(e.Notes, "stamp: "+err.Error())
+		}
+	}
 	for _, n := range e.Notes {
 		fmt.Fprintf(stderr, "skilltri env: %s\n", n)
 	}
