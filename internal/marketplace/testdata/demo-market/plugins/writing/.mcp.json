@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "notes": { "command": "${CLAUDE_PLUGIN_ROOT}/bin/notes", "args": ["--root", "${CLAUDE_PLUGIN_ROOT}/data"], "env": { "MODE": "demo" } },
+    "docs": { "type": "streamable-http", "url": "https://mcp.example.com/mcp", "headers": { "X-Demo": "1" } },
+    "legacy": { "type": "sse", "url": "https://mcp.example.com/sse" }
+  }
+}
