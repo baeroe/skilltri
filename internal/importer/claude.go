@@ -278,6 +278,9 @@ func installTree(src, dst string) error {
 	if err := copyTree(src, tmp); err != nil {
 		return err
 	}
+	if err := os.Chmod(tmp, 0o755); err != nil { // MkdirTemp creates 0700
+		return err
+	}
 	if err := os.RemoveAll(dst); err != nil {
 		return err
 	}

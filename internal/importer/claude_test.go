@@ -147,6 +147,11 @@ func TestApplyClaude(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(skillsDir, "synced")); err == nil {
 		t.Error("synced was copied")
 	}
+	if st, err := os.Stat(filepath.Join(skillsDir, "demo-skill")); err != nil {
+		t.Error(err)
+	} else if st.Mode().Perm() != 0o755 {
+		t.Errorf("skill folder mode = %v, want 0755", st.Mode().Perm())
+	}
 	if st, err := os.Stat(filepath.Join(skillsDir, "demo-skill/run.sh")); err != nil || st.Mode().Perm() != 0o755 {
 		t.Errorf("mode not preserved: %v %v", st, err)
 	}
