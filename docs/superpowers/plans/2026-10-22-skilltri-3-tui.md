@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.26, `github.com/charmbracelet/bubbletea` v1.3.10, `github.com/charmbracelet/bubbles` v1.0.0, `github.com/charmbracelet/lipgloss` v1.1.0, `github.com/charmbracelet/x/ansi` v0.11.6 (same versions as tussh).
 
-**Spec:** `CONCEPT.md` sections "TUI", "CLI", "Decisions" (ANSI palette colors only, width-safe icons). Reference implementation for look and feel: `~/development/baeroe/tussh/internal/tui` (read-only).
+**Spec:** `CONCEPT.md` sections "TUI", "CLI", "Decisions" (ANSI palette colors only, width-safe icons). Reference implementation for look and feel: tussh's `internal/tui` (read-only).
 
 ## Global Constraints
 

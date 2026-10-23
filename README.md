@@ -1,0 +1,341 @@
+# skilltri
+
+One **MCP gateway** and one **agent skill manager** for all your AI agent harnesses, with **per-folder rules** for both. You add MCP servers and skill sources (local folders, git repos, Claude plugin marketplaces) once, decide in which folders each one is active, and every harness gets exactly that set: Claude Code natively, Codex, Gemini CLI, OpenCode, Cursor, Copilot CLI and Amp through `.agents/skills` links, and anything else that speaks MCP through the gateway.
+
+- **You** run `skilltri` in any terminal: a TUI to manage servers, skill sources and the folder rules that decide where each one is active, plus a preview of what a session in a given folder gets.
+- **Agents** get everything through two channels: one MCP server (`skilltri mcp`, stdio) that only exposes the tools that apply to the session's folder, and native skill folders that skilltri builds per folder for each harness.
+
+![skilltri: the Servers tab with six demo servers, their status, tool counts and rules, and the selected server's tools](docs/screenshots/servers.png)
+
+*Servers: status, transport, tool count and the rules summary per server; the selected server with its own rules and its tools, one of them limited to a single folder.*
+
+Status: **v0.1.0**, macOS and Linux. See [Not supported yet](#not-supported-yet).
+
+## Why
+
+- A plain MCP gateway (such as 1MCP) exposes every server everywhere. Work, client and private projects need different servers, and should not see each other's tools.
+- Skills live in harness-specific folders (`~/.claude/skills`, `.agents/skills`, plugin caches). A user-level folder cannot differ per session, so "everywhere except this project" is impossible.
+- Skills from git repos and marketplaces should stay up to date without manual pulls.
+
+skilltri replaces the gateway and the harness-specific skill folders with one config and one set of rules.
+
+## How it works
+
+```
+ harness (Claude Code, Codex, …)                       skilltri daemon
+ started in ~/dev/acme-shop                            (one per user, Unix socket)
+ ├─ MCP: skilltri mcp  ── stdio ── thin shim ── socket ──► sessions, rules, downstream servers
+ │                                                         ├─ stdio servers (started on demand)
+ │                                                         └─ Streamable HTTP servers
+ └─ skills: CLAUDE_CODE_PLUGIN_DIRS=~/.cache/skilltri/views/<set>/claude-code/…
+            (set by the shell hook or `skilltri run` before the harness starts)
+```
+
+- **`skilltri daemon`** holds the connections to the downstream MCP servers, fetches skill sources on a schedule, builds the skill views and reloads the config when it changes. It listens on a Unix socket in the state dir. You can install it as a login service (`skilltri daemon install`); otherwise the first `skilltri mcp` starts it in the background.
+- **`skilltri mcp`** is the one MCP server you register in each harness. It is a thin stdio process: it tells the daemon the session folder and relays the JSON-RPC stream. The daemon exposes only the servers and tools whose rules match that folder, as `<server>_<tool>`, and sends `tools/list_changed` when a config change alters a session's set. Tools, prompts and resources are passed through.
+- **The session folder** is `--cwd DIR` or `$SKILLTRI_CWD` if given, else the single MCP root the client sends, else the working directory of `skilltri mcp` (harnesses start stdio servers in the project folder).
+- **Claude Code skills** come in through views: for a folder, skilltri computes the active skills and builds a directory of generated plugins under `~/.cache/skilltri/views/` (symlinks to the real skill folders, so plugin namespaces such as `review-kit:code-review` survive). The shell hook exports `CLAUDE_CODE_PLUGIN_DIRS` pointing there on every `cd`. The view lives outside the project because Claude Code also reads skills from parent folders, which would break `only` and `not-tree` rules.
+- **`.agents/skills` harnesses** (Codex, Gemini CLI, OpenCode, Cursor, Copilot CLI, Amp) have no way to redirect their skill folder yet, so their adapters are opt-in and fall back to symlinks in `<session folder>/.agents/skills/`, recorded in `.agents/skills/.skilltri.json`, added to `.git/info/exclude` and removed again when they no longer apply. Links are only made inside a git work tree, never in `$HOME` or above it. Because these harnesses read parent folders too, a link in a project is also seen from its subfolders.
+- **MCP fallback:** for harnesses without a native view, `skilltri mcp` lists the active skills in its server instructions and offers `skilltri_load_skill` and `skilltri_read_skill_file`. It switches this off for sessions that already get a native view, so skills never show up twice.
+
+## Folder rules
+
+Every MCP server, tool, skill source, plugin and skill can carry rules. A rule is a path plus one of four modes:
+
+| Mode | Active when the session folder is … |
+|---|---|
+| `only` | exactly this folder |
+| `tree` | this folder or any folder below it |
+| `not` | any folder except exactly this one |
+| `not-tree` | any folder except this one and the folders below it |
+
+- **No rules = active everywhere.**
+- **Excludes win.** `only`/`tree` are includes, `not`/`not-tree` are excludes. An item is active if it has no includes or at least one include matches, **and** no exclude matches.
+- **The nearest level decides.** The levels are source → plugin → skill and server → tool. Each level has an on/off switch, and an item is active only if all its ancestors are on. Its rules are those of the nearest level that has any: a skill's own rules replace its plugin's, which replace the source's.
+- Paths are compared after `~` expansion, cleaning and symlink resolution, so `~/dev` and `/Users/you/dev` match. Matching is path-only.
+
+Examples:
+
+| Rules on the item | Active in `~/dev/acme-shop` | in `~/dev/acme-shop/api` | in `~/dev/side-project` |
+|---|---|---|---|
+| none | yes | yes | yes |
+| `tree ~/dev/acme-shop` | yes | yes | no |
+| `only ~/dev/acme-shop` | yes | no | no |
+| `tree ~/dev` + `not-tree ~/dev/side-project` | yes | yes | no |
+| `not ~/dev/acme-shop` | no | yes | yes |
+
+```sh
+skilltri rule add server/tickets tree ~/dev/acme-shop
+skilltri rule add server/tickets/tool/delete_ticket only ~/dev/acme-shop
+skilltri rule add source/demo-market/plugin/review-kit not-tree ~/dev/side-project
+skilltri which ~/dev/acme-shop     # what a session there gets, and which rule decided
+```
+
+Targets are `server/NAME[/tool/TOOL]` and `source/NAME[/plugin/ENTRY|/skill/ID]` (`ENTRY` is the plugin's name in the marketplace, the `ID` of a plugin skill is `<plugin>:<skill>`). In the TUI, **r** opens the rules editor on the selected item.
+
+![The rules editor of the browser server: two rules, a plain-language summary and a check for one folder](docs/screenshots/rules.png)
+
+*The rules editor: the server's own rules, what they mean in plain words, and a check that shows which rule decides for a folder.*
+
+## Skill sources
+
+| Type | What | Updates |
+|---|---|---|
+| `local` | any folder you point at, or `~/.config/skilltri/skills/` (`skilltri skill new NAME` creates a skill there and the source `local` for it; **n** in the Skills tab) | none, read live |
+| `git` | GitHub shorthand `owner/repo` or any git URL, optional `--ref` (branch, tag or commit) and `--subpath`; may contain many skills | fetched by the daemon |
+| `marketplace` | a repo or folder with `.claude-plugin/marketplace.json` | fetched by the daemon, then the plugins are resolved again |
+
+```sh
+skilltri source add local my-skills ~/skills
+skilltri source add git team-skills acme/team-skills --ref main --subpath skills
+skilltri source add marketplace demo-market acme/demo-market --plugins disabled
+skilltri enable source/demo-market/plugin/review-kit
+skilltri update                    # fetch all git and marketplace sources now
+```
+
+- **Discovery:** every folder with a `SKILL.md` below the source (or its subpath) is a skill, following the agentskills.io format (`name` of `a-z`, `0-9` and `-`, at most 64 characters, matching the folder name; `description` at most 1024 characters). Invalid frontmatter is a warning in Doctor, not an error.
+- **Updates:** the daemon fetches every `git` and `marketplace` source once an hour by default; `--every 30m` changes the interval per source, `--every 0` means manual only (`skilltri update [source…]`, or **u**/**U** in the Skills tab).
+- **Pinning:** a `--ref` that is a full commit SHA is pinned and never moves. A lock file in the state dir records the fetched commit and a content hash per skill, so Doctor notices local changes to a checkout.
+- **Marketplace plugins:** relative paths, `github`, `url` (git) and `git-subdir` plugin sources are supported. From each plugin skilltri takes `skills/` plus the extra paths of a `skills` key in `plugin.json`; plugin skills keep their namespace (`review-kit:code-review`). Plugins are on by default; `--plugins disabled` turns them off unless you enable them one by one, so plugins added upstream later stay off. Disabled plugins are never fetched.
+- **Plugin MCP servers** (a plugin's `.mcp.json`) are listed as *available, off*. Switching one on (`skilltri plugin-server enable SOURCE/PLUGIN/SERVER`, or **E** in the Skills tab) makes it a normal gateway server with a copy of the plugin's effective rules. If an update later changes its definition (command, args, URL, env), the server keeps running the old definition and is marked **needs review** until you accept the change (`skilltri plugin-server accept NAME`, or **A** in the Servers tab). A server that runs code from the plugin folder is also marked when the plugin's checkout moves to another commit.
+- Hooks, subagents, LSP servers, `bin/` and settings of plugins are not taken over.
+
+## Install
+
+```sh
+brew install baeroe/tap/skilltri
+```
+
+Or with Go (1.26+):
+
+```sh
+go install github.com/baeroe/skilltri@latest
+```
+
+From source:
+
+```sh
+make install          # builds to ~/.local/bin/skilltri
+```
+
+Skilltri needs `git` on `PATH` for git and marketplace sources.
+
+## Quick start
+
+1. **Import what you have** (optional). From 1MCP: servers and timeouts. Header values always go to the keyring, env values only when the key looks like a credential (contains `token`, `key`, `secret`, `password` or `auth`); other env values stay in `config.json`. 1MCP tags are not imported (set folder rules instead), and `sse` servers are skipped. From Claude Code: installed marketplaces (only the enabled plugins stay on) and user skills; it prints what to clean up in Claude Code afterwards.
+
+   ```sh
+   skilltri import 1mcp       # reads ~/.config/1mcp/mcp.json, or: skilltri import 1mcp path/to/mcp.json
+   skilltri import claude
+   ```
+
+   You can also add servers in the TUI (**a** in the Servers tab) and skill sources with `skilltri source add` or **a** in the Skills tab.
+
+2. **Register the gateway** in your harness, once. For Claude Code:
+
+   ```sh
+   claude mcp add --scope user skilltri -- skilltri mcp
+   ```
+
+   The **Setup** tab shows the snippets for Codex CLI, Gemini CLI, opencode and Cursor with the absolute path of your binary, and copies them with **c**. Then remove the 1MCP entry from the harness's config (Doctor reports "1MCP still registered") and any server that skilltri now serves, or it runs twice (Doctor reports such duplicates too).
+
+3. **Add the shell hook** to your rc file, so harnesses started from a shell get the folder's skills:
+
+   ```sh
+   eval "$(skilltri shell-init zsh)"     # ~/.zshrc
+   eval "$(skilltri shell-init bash)"    # ~/.bashrc
+   skilltri shell-init fish | source     # ~/.config/fish/config.fish
+   ```
+
+   The hook runs on every `cd`, and again at the next prompt when the config or the skill catalog changed or the view folder is gone, so you never need to `cd` again after a change.
+
+   Claude Code gets its skills this way by default. Codex, Gemini CLI, OpenCode, Cursor, Copilot CLI and Amp need their adapter enabled (`skilltri adapter enable codex`, or **space** on the adapter in the Setup tab); otherwise they get skills only through the MCP fallback.
+
+   Without the hook, start a harness through skilltri instead: `skilltri run claude-code` (or `codex`, `gemini-cli`, `opencode`, `cursor`, `github-copilot`, `amp`; extra arguments are passed on).
+
+4. **Install the daemon** as a login service (a launchd agent on macOS, a systemd user unit on Linux):
+
+   ```sh
+   skilltri daemon install
+   ```
+
+5. **Check the setup:**
+
+   ```sh
+   skilltri doctor
+   ```
+
+Then open `skilltri`, set rules on your servers and sources, and check the result for a folder in the Preview tab or with `skilltri which DIR`.
+
+## TUI
+
+`skilltri` opens the TUI (`skilltri --tab NAME` opens a tab directly). The header shows the tabs (**1**–**5**) and status chips (daemon, ready servers, skills, warnings), the footer the keys of the current view. **?** opens all keys, **R** reloads config, catalog and status, **Esc** closes a dialog, **q** quits. Colors come from your terminal's ANSI palette. Below 90 columns the panes are stacked.
+
+![A short tour: the Servers tab, the rules editor, the Skills tab, the Preview and the Doctor](docs/screenshots/tour.gif)
+
+*Servers, a server's rules, skills, the preview for a folder and the doctor, with demo data.*
+
+| View | What you see | Keys |
+|---|---|---|
+| Servers | The servers with status (● ready, ○ dim: switched off or not running, ○ yellow: starting, ! error, ? needs review), transport, tool count and rules summary; details with URL or command, timeout, headers (secrets masked), rules, tools and the last errors. | **a** add · **e** edit · **d** delete · **space** on/off · **r** rules · **t** select tools (then **space** on/off, **r** rules) · **x** restart · **A** accept a plugin server change · **/** filter |
+| Skills | The tree source → plugin → skill with type, ref, commit and last fetch, disabled plugins, warnings and plugin servers; details with the skill's folder, description and the rules that apply (own or inherited). | **a** add source · **e** edit · **d** delete · **n** new local skill · **o** open `SKILL.md` in `$EDITOR` · **space** on/off · **r** rules · **u** update source · **U** update all · **E** enable plugin server · **enter** expand · **/** filter |
+| Preview | Pick a folder (default: the TUI's working directory) and see the effective servers, tools and skills, each with the rule and level that decided. | **/** folder · **f** only active / show all · **enter** jump to the item · **c** copy the env line |
+| Setup | Registration snippets per harness (✓ when registered, with detected duplicates), the shell hook line per shell, the daemon service, the adapters and the importers. | **c** copy · **i**/**x** install/uninstall the service · **s** stop the daemon · **space** adapter on/off · **enter** preview an import |
+| Doctor | The results of `skilltri doctor`, grouped by severity, with the fix for the selected finding. | **r** run again · **enter** jump to the item |
+
+The rules editor (**r**) adds rules with **a** (mode with **←→**, folder completion with **Tab**, **Ctrl+S** to add), deletes with **d**, undoes with **u** and checks a folder with **c**.
+
+![The Skills tab: a marketplace with plugins, a local and a git source, and the selected plugin skill with inherited rules](docs/screenshots/skills.png)
+
+*Skills: a marketplace with one disabled plugin, a plugin server waiting for review and one still off, a local and a git source; the selected skill inherits its plugin's rule.*
+
+![The Preview tab for ~/dev/acme-shop: servers, tools and skills with the reason for each](docs/screenshots/preview.png)
+
+*Preview: what a session in `~/dev/acme-shop` gets, and why.*
+
+![The Setup tab: harnesses, shell hook lines, the daemon service, adapters and importers](docs/screenshots/setup.png)
+
+*Setup: Claude Code is registered (with one duplicate server), the zsh hook line for `~/.zshrc`, and the adapters with the harnesses they detected.*
+
+![The Doctor tab with two warnings and a hint, and the fix for a duplicate server](docs/screenshots/doctor.png)
+
+*Doctor: a server that Claude Code also registers itself, a plugin server waiting for review, and the missing shell hook.*
+
+## CLI reference
+
+```
+skilltri [--tab NAME]                    open the TUI (NAME: servers, skills, preview, setup, doctor)
+skilltri help | version
+```
+
+**Gateway and daemon**
+
+```
+skilltri mcp [--cwd DIR]                 MCP server on stdio (started by your harness)
+skilltri daemon [--wait]                 run the daemon in the foreground
+                                         (--wait: wait for a running daemon to exit, then take over)
+skilltri daemon stop                     stop the running daemon
+skilltri daemon install                  install and start the daemon as a login service
+skilltri daemon uninstall                stop and remove the login service
+skilltri status [--json]                 daemon, servers and config errors
+skilltri which [DIR] [--json]            what a session in DIR gets, and why
+skilltri doctor [--json]                 check config, daemon, sources, skills and harness setup (read-only)
+```
+
+**Skills**
+
+```
+skilltri source add local NAME PATH
+skilltri source add git NAME URL [--ref R] [--subpath P] [--every D]
+skilltri source add marketplace NAME URL|PATH [--ref R] [--every D] [--plugins enabled|disabled]
+skilltri source remove NAME
+skilltri source list [--json]
+skilltri update [SOURCE...] [--json]     fetch sources now (all when none is named)
+skilltri skill new NAME                  create a local skill in ~/.config/skilltri/skills/
+skilltri plugin-server list [--json]     MCP servers bundled with marketplace plugins
+skilltri plugin-server enable SOURCE/PLUGIN/SERVER [--name N]
+skilltri plugin-server accept NAME       take over a plugin's changed server definition
+```
+
+**Rules and switches**
+
+```
+skilltri rule add TARGET MODE PATH       MODE: only, tree, not, not-tree
+skilltri rule remove TARGET INDEX|all
+skilltri rule list [TARGET] [--json]
+skilltri enable TARGET                   TARGET: server/N[/tool/T] or source/N[/plugin/P|/skill/ID]
+skilltri disable TARGET
+```
+
+**Harnesses**
+
+```
+skilltri shell-init zsh|bash|fish        print the shell hook
+skilltri env [DIR] [--shell zsh|bash|fish]
+                                         print the skill variables for a folder (used by the hook)
+skilltri run HARNESS [ARGS...]           start a harness with the skills of the working directory
+skilltri adapter list [--json]
+skilltri adapter enable ID               let a harness get project skill links
+skilltri adapter disable ID
+```
+
+Harness and adapter IDs: `claude-code`, `codex`, `gemini-cli`, `opencode`, `cursor`, `github-copilot`, `amp`. The Claude Code adapter is on by default.
+
+**Import and secrets**
+
+```
+skilltri import 1mcp [FILE] [--force]    import servers from a 1MCP mcp.json (default ~/.config/1mcp/mcp.json)
+skilltri import claude [--home DIR] [--force]
+                                         import Claude Code marketplaces and user skills
+skilltri secret set NAME                 store a secret in the keyring (prompts, or reads stdin)
+skilltri secret delete NAME
+```
+
+Without `--force`, an import skips servers, sources and skills that already exist.
+
+## Files
+
+| What | Where | Override |
+|---|---|---|
+| Config (`config.json`, local skills in `skills/`) | `~/.config/skilltri` (also on macOS) | `SKILLTRI_CONFIG_DIR`, else `XDG_CONFIG_HOME` |
+| State (daemon socket, lock, log, `skills.lock`) | `~/.local/state/skilltri` | `SKILLTRI_STATE_DIR`, else `XDG_STATE_HOME`; the socket alone: `SKILLTRI_SOCKET` |
+| Data (source checkouts in `sources/`) | `~/.local/share/skilltri` | `SKILLTRI_DATA_DIR`, else `XDG_DATA_HOME` |
+| Cache (`catalog.json`, `views/`, hook stamps) | `~/.cache/skilltri` | `SKILLTRI_CACHE_DIR`, else `XDG_CACHE_HOME` |
+| Login service | `~/Library/LaunchAgents/io.github.baeroe.skilltri.plist` (macOS), `skilltri.service` systemd user unit (Linux) | |
+
+`config.json` is written by the TUI, the CLI and the importers with a locked read-modify-write and an atomic rename, so they can run at the same time; the daemon reloads it on change. You can edit it by hand too. A server looks like this:
+
+```json
+{
+  "version": 1,
+  "servers": {
+    "tickets": {
+      "type": "http",
+      "url": "https://tickets.example/mcp",
+      "headers": { "Authorization": "Bearer ${secret:tickets-token}" },
+      "rules": [{ "path": "~/dev/acme-shop", "mode": "tree" }]
+    },
+    "browser": {
+      "type": "stdio",
+      "command": "browser-mcp",
+      "args": ["--headless"],
+      "perSession": true,
+      "requestTimeoutMs": 120000
+    }
+  },
+  "settings": {}
+}
+```
+
+Downstream servers are `stdio` or Streamable `http`. They start when the first session that may use them asks for their tools and stop after an idle timeout (`settings.idleTimeoutSec`, default 600). They are shared between sessions unless `perSession` is set. Remote servers that need OAuth run through `mcp-remote <url>` as a stdio server.
+
+## Security notes
+
+- **Folder separation is a convenience, not a security boundary.** It keeps tool lists and skills relevant per folder. It does not stop an agent that lies about its folder, starts `skilltri mcp --cwd` elsewhere, or reads files with its own shell. Downstream servers are shared between sessions unless `perSession` is set. For real separation (for example between a company and a private token for the same service) use two servers with different credentials and rules.
+- **Secrets live in the keyring** (macOS Keychain, Secret Service on Linux) under the service `skilltri`. The config only holds references like `${secret:tickets-token}` in `env` and `headers`; `skilltri secret set`, the server form (**Ctrl+K** on a line) and `import 1mcp` put values there. Anyone running as your user can read them.
+- **Plugin MCP servers are opt-in** and held at their reviewed definition when an update changes them, because an update could change what gets executed. Skills themselves are instructions for your agent: review what a source contains before you add it, and pin a commit when you want to decide when it changes.
+- `skilltri_read_skill_file` only serves files inside the skill's folder.
+- **`skilltri doctor`** (read-only) checks: the config, the daemon (running, same version as the binary), sources (never fetched, fetch errors), skills (invalid frontmatter, a missing catalog), the lock file (checkouts changed locally), broken links in views and in `.agents/skills`, skills and plugins Claude Code also loads itself, plugin servers waiting for review, harness registrations (skilltri missing, 1MCP still registered, servers registered twice), the shell hook and installed harnesses without an enabled adapter.
+
+## Not supported yet
+
+- Windows
+- Native OAuth for remote MCP servers (use `mcp-remote`)
+- Sampling and elicitation passthrough, legacy SSE transport
+- Plugin hooks, subagents, LSP servers, `bin/` and settings; `npm`, `archive` and `command` plugin sources
+- Rules that match a git remote or repo name instead of a path
+- Redirecting the skill folder of the `.agents/skills` harnesses (they use project links or the MCP fallback)
+
+## Development
+
+```sh
+make build            # bin/skilltri
+make test             # gofmt check + go vet + go test -race ./...
+make screenshots      # re-render docs/screenshots from the VHS tapes in docs/tapes
+```
+
+`make screenshots` needs [VHS](https://github.com/charmbracelet/vhs) and runs skilltri in a throwaway sandbox (its own `HOME` and directories) seeded with demo data only. Re-render the screenshots in the same change when the UI changes visibly. [CONCEPT.md](CONCEPT.md) has the design and the decisions behind it.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
