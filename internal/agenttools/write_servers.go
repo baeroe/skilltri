@@ -23,7 +23,7 @@ func init() {
 		}, addServer),
 		writeTool(&mcp.Tool{
 			Name:        "skilltri_update_server",
-			Description: "Change an MCP server: only the fields given change, everything else (rules, tool settings, plugin origin, disabled flag) stays. A given env or headers map replaces the whole map; a value shown masked by skilltri_list_servers (with •••) keeps the stored value of that key. newName renames the server.",
+			Description: "Change an MCP server: only the fields given change, everything else (rules, tool settings, plugin origin, disabled flag) stays. A given env or headers map replaces the whole map and given args the whole list. Values sent back as skilltri_list_servers shows them (masked with •••) keep the hidden stored value: an env or header value of the same key, an argument at the same position (else the stored argument with that masked form) and the url; any other value containing ••• is refused. newName renames the server.",
 			InputSchema: required(object(serverProps(true)), "name"),
 		}, updateServer),
 		writeTool(&mcp.Tool{
@@ -102,7 +102,7 @@ func (a *serverArgs) parse(args json.RawMessage, ch *change) error {
 		ch.target = "server/" + a.Name
 	}
 	var s config.Server
-	a.apply(&s)
+	_ = a.apply(&s) // only for the literals; masked values are refused by the real apply
 	ch.secrets = secretLiterals(&s)
 	if a.Name == "" {
 		return errors.New("name is required")
@@ -113,9 +113,12 @@ func (a *serverArgs) parse(args json.RawMessage, ch *change) error {
 	return nil
 }
 
-// apply sets the given fields on s. A given env or header value that equals the masked form of
-// the stored one (and so contains •••) keeps the stored value.
-func (a *serverArgs) apply(s *config.Server) {
+// apply sets the given fields on s. A given value that equals the masked form of the stored one
+// (and so contains •••) keeps the stored value: an env or header value of the same key, an
+// argument at the same position (else the first stored argument with that masked form) and the
+// url. A given value that still contains ••• after that is refused, so a masked view sent back
+// never replaces a secret with "•••".
+func (a *serverArgs) apply(s *config.Server) error {
 	set := func(dst *string, v *string) {
 		if v != nil {
 			*dst = *v
@@ -124,9 +127,15 @@ func (a *serverArgs) apply(s *config.Server) {
 	set(&s.Type, a.Type)
 	set(&s.Command, a.Command)
 	set(&s.Cwd, a.Cwd)
-	set(&s.URL, a.URL)
+	if a.URL != nil {
+		u := *a.URL
+		if strings.Contains(u, mask) && s.URL != "" && u == MaskURL(s.URL) {
+			u = s.URL
+		}
+		s.URL = u
+	}
 	if a.Args != nil {
-		s.Args = slices.Clone(*a.Args)
+		s.Args = keepMaskedArgs(*a.Args, s.Args)
 	}
 	if a.Env != nil {
 		s.Env = keepMasked(*a.Env, s.Env)
@@ -143,6 +152,40 @@ func (a *serverArgs) apply(s *config.Server) {
 	if a.Disabled != nil {
 		s.Disabled = *a.Disabled
 	}
+	return a.checkMasked(s)
+}
+
+// checkMasked refuses a given field of s that still contains ••• (a masked value that matched
+// no stored one).
+func (a *serverArgs) checkMasked(s *config.Server) error {
+	refuse := func(what string) error {
+		return fmt.Errorf("%s contains %q, a masked value that matches no stored value: pass the real value or a ${secret:NAME} reference", what, mask)
+	}
+	if a.URL != nil && strings.Contains(s.URL, mask) {
+		return refuse("url")
+	}
+	if a.Args != nil {
+		for i, v := range s.Args {
+			if strings.Contains(v, mask) {
+				return refuse(fmt.Sprintf("args[%d]", i))
+			}
+		}
+	}
+	for _, m := range []struct {
+		name  string
+		given bool
+		vals  map[string]string
+	}{{"env", a.Env != nil, s.Env}, {"headers", a.Headers != nil, s.Headers}} {
+		if !m.given {
+			continue
+		}
+		for _, k := range slices.Sorted(maps.Keys(m.vals)) {
+			if strings.Contains(m.vals[k], mask) {
+				return refuse(m.name + " " + k)
+			}
+		}
+	}
+	return nil
 }
 
 func keepMasked(given, old map[string]string) map[string]string {
@@ -155,6 +198,29 @@ func keepMasked(given, old map[string]string) map[string]string {
 	}
 	if len(out) == 0 {
 		return nil
+	}
+	return out
+}
+
+// keepMaskedArgs restores every given argument that equals the masked form (MaskArgs) of a stored
+// one: the one at the same position, else the first stored argument with that masked form.
+func keepMaskedArgs(given, old []string) []string {
+	shown := MaskArgs(old)
+	out := slices.Clone(given)
+	for i, v := range out {
+		if !strings.Contains(v, mask) {
+			continue
+		}
+		if i < len(old) && shown[i] == v && old[i] != v {
+			out[i] = old[i]
+			continue
+		}
+		for j := range old {
+			if shown[j] == v && old[j] != v {
+				out[i] = old[j]
+				break
+			}
+		}
 	}
 	return out
 }
@@ -201,7 +267,9 @@ func addServer(_ context.Context, b Backend, c Call, args json.RawMessage, ch *c
 	}
 	ch.summary = "add: " + a.summary()
 	var s config.Server
-	a.apply(&s)
+	if err := a.apply(&s); err != nil {
+		return err
+	}
 	if err := actions.ServerAdd(callEnv(b, c), a.Name, s); err != nil {
 		return err
 	}
@@ -220,7 +288,7 @@ func updateServer(_ context.Context, b Backend, c Call, args json.RawMessage, ch
 		if err := actions.ServerRename(e, a.Name, *a.NewName); err != nil {
 			return err
 		}
-	} else if err := actions.ServerPatch(e, a.Name, deref(a.NewName), func(s *config.Server) error { a.apply(s); return nil }); err != nil {
+	} else if err := actions.ServerPatch(e, a.Name, deref(a.NewName), a.apply); err != nil {
 		return err
 	}
 	ch.message = fmt.Sprintf("Updated server %q.", a.Name)

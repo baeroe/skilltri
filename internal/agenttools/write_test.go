@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -495,5 +496,55 @@ func TestShortLiteralsKeepConfirmations(t *testing.T) {
 	text, _ = call(t, b, demoCall, "skilltri_add_server", map[string]any{"name": "demo", "type": "stdio", "command": "x", "env": map[string]string{"K": "demo"}})
 	if strings.Contains(text, "demo") {
 		t.Fatalf("error text shows the literal: %s", text)
+	}
+}
+
+// An agent that sends back the args and url skilltri_list_servers showed keeps the stored secret
+// values; a masked value that matches nothing stored is refused.
+func TestUpdateServerMaskedRoundTrip(t *testing.T) {
+	b := writeBackend(t)
+	args := []string{"--api-key", writeLiteral, "--auth-token=" + writeLiteral, "--verbose"}
+	url := "https://user:" + writeLiteral + "@mcp.example.test/mcp?key=" + writeLiteral
+	if err := config.Update(b.env.ConfigPath, func(c *config.Config) error {
+		c.Servers["demo"].Args = args
+		c.Servers["web"] = &config.Server{Type: "http", URL: url}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	shown := MaskArgs(args)
+	// same positions, plus an added flag
+	mustWrite(t, b, "skilltri_update_server", map[string]any{"name": "demo", "args": append(slices.Clone(shown), "--new")})
+	if got := b.load(t).Servers["demo"].Args; !slices.Equal(got, append(slices.Clone(args), "--new")) {
+		t.Fatalf("args = %v", got)
+	}
+	// moved: a masked value matches the masked form of another stored argument
+	mustWrite(t, b, "skilltri_update_server", map[string]any{"name": "demo", "args": []string{"--first", shown[2]}})
+	if got := b.load(t).Servers["demo"].Args; !slices.Equal(got, []string{"--first", args[2]}) {
+		t.Fatalf("moved args = %v", got)
+	}
+	mustWrite(t, b, "skilltri_update_server", map[string]any{"name": "web", "url": MaskURL(url), "requestTimeoutMs": 1000})
+	if got := b.load(t).Servers["web"]; got.URL != url || got.RequestTimeoutMs != 1000 {
+		t.Fatalf("web = %+v", got)
+	}
+	lastAudit(t, b, "skilltri_update_server", "server/web", true)
+
+	for _, c := range []struct {
+		args map[string]any
+		want string
+	}{
+		{map[string]any{"name": "demo", "env": map[string]string{"API_KEY": "•••", "OTHER": "•••"}}, "env OTHER"},
+		{map[string]any{"name": "demo", "args": []string{"--password", "•••"}}, "args"},
+		{map[string]any{"name": "web", "url": "https://•••@other.example.test/mcp"}, "url"},
+		{map[string]any{"name": "demo", "headers": map[string]string{"X": "a•••"}}, "headers X"},
+	} {
+		text := mustFail(t, b, "skilltri_update_server", c.args)
+		if !strings.Contains(text, c.want) || !strings.Contains(text, "pass the real value or a ${secret:NAME} reference") {
+			t.Errorf("%v: %q", c.args, text)
+		}
+	}
+	text := mustFail(t, b, "skilltri_add_server", map[string]any{"name": "copy", "type": "stdio", "command": "x", "env": map[string]string{"K": "•••"}})
+	if !strings.Contains(text, "pass the real value or a ${secret:NAME} reference") {
+		t.Errorf("add_server: %q", text)
 	}
 }
