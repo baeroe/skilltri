@@ -489,3 +489,48 @@ func TestRuleSet(t *testing.T) {
 		t.Errorf("clear: %v", err)
 	}
 }
+
+func TestServerPatch(t *testing.T) {
+	e := testEnv(t)
+	s := stdio
+	s.Disabled = true
+	s.Rules = []rules.Rule{{Path: "/srv", Mode: rules.Tree}}
+	if err := ServerAdd(e, "alpha", s); err != nil {
+		t.Fatal(err)
+	}
+	if err := ServerAdd(e, "beta", stdio); err != nil {
+		t.Fatal(err)
+	}
+	if err := ServerPatch(e, "alpha", "", func(s *config.Server) error { s.Disabled = false; s.Cwd = "/w"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if got := load(t, e).Servers["alpha"]; got.Disabled || got.Cwd != "/w" || got.Command != "demo-server" || len(got.Rules) != 1 {
+		t.Fatalf("alpha = %+v", got)
+	}
+	before := raw(t, e)
+	for _, c := range []struct {
+		name, newName string
+		fn            func(*config.Server) error
+		kind          error
+	}{
+		{"nope", "", func(*config.Server) error { return nil }, ErrNotFound},
+		{"alpha", "beta", func(*config.Server) error { return nil }, ErrExists},
+		{"alpha", "gamma", func(s *config.Server) error { s.Command = ""; return nil }, nil},
+		{"alpha", "skilltri", func(*config.Server) error { return nil }, nil},
+		{"alpha", "", func(*config.Server) error { return errors.New("demo failure") }, nil},
+	} {
+		err := ServerPatch(e, c.name, c.newName, c.fn)
+		if err == nil || (c.kind != nil && !errors.Is(err, c.kind)) {
+			t.Errorf("patch %s→%s = %v, want %v", c.name, c.newName, err, c.kind)
+		}
+	}
+	if !bytes.Equal(before, raw(t, e)) {
+		t.Error("config changed by failed patches")
+	}
+	if err := ServerPatch(e, "alpha", "gamma", func(s *config.Server) error { s.Args = []string{"-v"}; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if c := load(t, e); c.Servers["alpha"] != nil || c.Servers["gamma"] == nil || len(c.Servers["gamma"].Args) != 1 || len(c.Servers["gamma"].Rules) != 1 {
+		t.Fatalf("after rename: %+v", c.Servers)
+	}
+}

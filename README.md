@@ -180,7 +180,7 @@ Then open `skilltri`, set rules on your servers and sources, and check the resul
 | Servers | The servers with status (● ready, ○ dim: switched off or not running, ○ yellow: starting, ! error, ? needs review), transport, tool count and rules summary; details with URL or command, timeout, headers (secrets masked), rules, tools and the last errors. | **a** add · **e** edit · **d** delete · **space** on/off · **r** rules · **t** select tools (then **space** on/off, **r** rules) · **x** restart · **A** accept a plugin server change · **/** filter |
 | Skills | The tree source → plugin → skill with type, ref, commit and last fetch, disabled plugins, warnings and plugin servers; details with the skill's folder, description and the rules that apply (own or inherited). | **a** add source · **e** edit · **d** delete · **n** new local skill · **o** open `SKILL.md` in `$EDITOR` · **space** on/off · **r** rules · **u** update source · **U** update all · **E** enable plugin server · **enter** expand · **/** filter |
 | Preview | Pick a folder (default: the TUI's working directory) and see the effective servers, tools and skills, each with the rule and level that decided. | **/** folder · **f** only active / show all · **enter** jump to the item · **c** copy the env line |
-| Setup | Registration snippets per harness (✓ when registered, with detected duplicates), the shell hook line per shell, the daemon service, the adapters and the importers. | **c** copy · **i**/**x** install/uninstall the service · **s** stop the daemon · **space** adapter on/off · **enter** preview an import |
+| Setup | Registration snippets per harness (✓ when registered, with detected duplicates), the shell hook line per shell, the daemon service, the adapters, the agent access level and the importers. | **c** copy · **i**/**x** install/uninstall the service · **s** stop the daemon · **space** adapter on/off, agent access off → read → write · **enter** preview an import |
 | Doctor | The results of `skilltri doctor`, grouped by severity, with the fix for the selected finding. | **r** run again · **enter** jump to the item |
 
 The rules editor (**r**) adds rules with **a** (mode with **←→**, folder completion with **Tab**, **Ctrl+S** to add), deletes with **d**, undoes with **u** and checks a folder with **c**.
@@ -193,13 +193,49 @@ The rules editor (**r**) adds rules with **a** (mode with **←→**, folder com
 
 *Preview: what a session in `~/dev/acme-shop` gets, and why.*
 
-![The Setup tab: harnesses, shell hook lines, the daemon service, adapters and importers](docs/screenshots/setup.png)
+![The Setup tab: harnesses, shell hook lines, the daemon service, adapters, agent access and importers](docs/screenshots/setup.png)
 
-*Setup: Claude Code is registered (with one duplicate server), the zsh hook line for `~/.zshrc`, and the adapters with the harnesses they detected.*
+*Setup: Claude Code is registered (with one duplicate server), the zsh hook line for `~/.zshrc`, the adapters with the harnesses they detected, and agents with write access.*
 
-![The Doctor tab with two warnings and a hint, and the fix for a duplicate server](docs/screenshots/doctor.png)
+![The Doctor tab with two warnings and two hints, and the fix for a duplicate server](docs/screenshots/doctor.png)
 
-*Doctor: a server that Claude Code also registers itself, a plugin server waiting for review, and the missing shell hook.*
+*Doctor: a server that Claude Code also registers itself, a plugin server waiting for review, the reminder that agents can change skilltri, and the missing shell hook.*
+
+## Agent tools
+
+Besides the tools of your servers, every session gets skilltri's own management tools (`skilltri_*`), so you can ask an agent to set skilltri up for you: "add the docs server only for `~/dev/acme-shop`", "why is the tickets server not active here?", "write a skill for our release checklist". A change reaches every running session within seconds (the daemon watches the config), no harness restart needed.
+
+| Tool | What it does |
+|---|---|
+| `skilltri_get_status` | daemon, servers with state and errors, sources with commit and error, sessions, the access level |
+| `skilltri_which` | what a session in a folder gets, and why |
+| `skilltri_list_servers` | servers with command or URL, args, env and headers (values masked), rules and tool settings |
+| `skilltri_list_skills` | catalog skills with description, source, enabled and active state, rules |
+| `skilltri_list_sources` | sources with type, location, ref, interval, rules, plugins, commit and error |
+| `skilltri_read_skill` | the `SKILL.md` and file list of any catalog skill, active or not |
+| `skilltri_run_doctor` | the `skilltri doctor` findings for the session's folder |
+| `skilltri_add_server`, `skilltri_update_server`, `skilltri_remove_server` | manage servers (the name `skilltri` is reserved) |
+| `skilltri_restart_server` | stop every instance of a server; the next use starts it fresh |
+| `skilltri_enable_plugin_server`, `skilltri_accept_plugin_server` | take over servers bundled with marketplace plugins |
+| `skilltri_set_enabled` | switch a server, tool, source, plugin or skill on or off |
+| `skilltri_add_rule`, `skilltri_remove_rule`, `skilltri_set_rules` | edit folder rules |
+| `skilltri_set_adapter` | switch a harness adapter on or off |
+| `skilltri_add_source`, `skilltri_remove_source`, `skilltri_update_sources` | manage skill sources and fetch them now |
+| `skilltri_new_skill`, `skilltri_write_skill` | create a skill in `~/.config/skilltri/skills/`, rewrite the `SKILL.md` of a skill from a local source (git and marketplace skills are refused) |
+
+`settings.agentAccess` decides which of them sessions get. Switch it in the Setup tab (**space** on "agent tools") or in `config.json`:
+
+| Level | Tools |
+|---|---|
+| `write` (default) | all of them |
+| `read` | the read-only ones (status, which, list, read skill, doctor) |
+| `off` | none |
+
+The skill fallback tools (`skilltri_load_skill`, `skilltri_read_skill_file`) do not depend on this setting. No tool can change `agentAccess` itself, and no tool reads or writes the keyring: agents see `${secret:NAME}` references and `•••` for literal env and header values, and they set values as references or literals.
+
+**Security:** `write` lets an agent add a stdio server, and its command runs as you in the skilltri daemon, outside the harness's sandbox and permission prompts. Treat an agent with write access like a shell: keep `write` for agents you trust (or switch to `read`), and check `skilltri audit` for what they changed. Skills from git and marketplace sources are third-party content: `skilltri_read_skill` says so in a first line, and `skilltri_write_skill` writes only real files inside a local source folder (no symlinks out of it, never into skilltri's checkouts).
+
+Every call of a changing tool is appended to `audit.jsonl` in the state folder (time, tool, target, a summary without env or header values, client, folder, result). `skilltri audit [-n N] [--json]` shows the last N entries (default 20); `skilltri doctor` reminds you while agents have write access.
 
 ## CLI reference
 
@@ -220,6 +256,7 @@ skilltri daemon uninstall                stop and remove the login service
 skilltri status [--json]                 daemon, servers and config errors
 skilltri which [DIR] [--json]            what a session in DIR gets, and why
 skilltri doctor [--json]                 check config, daemon, sources, skills and harness setup (read-only)
+skilltri audit [-n N] [--json]           the last N (default 20) changes agents made through skilltri's tools
 ```
 
 **Skills**
@@ -278,7 +315,7 @@ Without `--force`, an import skips servers, sources and skills that already exis
 | What | Where | Override |
 |---|---|---|
 | Config (`config.json`, local skills in `skills/`) | `~/.config/skilltri` (also on macOS) | `SKILLTRI_CONFIG_DIR`, else `XDG_CONFIG_HOME` |
-| State (daemon socket, lock, log, `skills.lock`) | `~/.local/state/skilltri` | `SKILLTRI_STATE_DIR`, else `XDG_STATE_HOME`; the socket alone: `SKILLTRI_SOCKET` |
+| State (daemon socket, lock, log, `skills.lock`, the agent audit log `audit.jsonl`) | `~/.local/state/skilltri` | `SKILLTRI_STATE_DIR`, else `XDG_STATE_HOME`; the socket alone: `SKILLTRI_SOCKET` |
 | Data (source checkouts in `sources/`) | `~/.local/share/skilltri` | `SKILLTRI_DATA_DIR`, else `XDG_DATA_HOME` |
 | Cache (`catalog.json`, `views/`, hook stamps) | `~/.cache/skilltri` | `SKILLTRI_CACHE_DIR`, else `XDG_CACHE_HOME` |
 | Login service | `~/Library/LaunchAgents/io.github.baeroe.skilltri.plist` (macOS), `skilltri.service` systemd user unit (Linux) | |
@@ -315,6 +352,7 @@ Downstream servers are `stdio` or Streamable `http`. They start when the first s
 - **Secrets live in the keyring** (macOS Keychain, Secret Service on Linux) under the service `skilltri`. The config only holds references like `${secret:tickets-token}` in `env` and `headers`; `skilltri secret set`, the server form (**Ctrl+K** on a line) and `import 1mcp` put values there. Anyone running as your user can read them.
 - **Plugin MCP servers are opt-in** and held at their reviewed definition when an update changes them, because an update could change what gets executed. Skills themselves are instructions for your agent: review what a source contains before you add it, and pin a commit when you want to decide when it changes.
 - `skilltri_read_skill_file` only serves files inside the skill's folder.
+- **Agents can change skilltri by default** (`settings.agentAccess` `write`): an agent can add a server that runs a command, add a skill source or rewrite a local skill. Set the level to `read` or `off` in the Setup tab if you do not want that, and check `skilltri audit` for what agents changed. The tools never show or store keyring values and mask literal env and header values, but an agent with its own shell can still read `config.json`.
 - **`skilltri doctor`** (read-only) checks: the config, the daemon (running, same version as the binary), sources (never fetched, fetch errors), skills (invalid frontmatter, a missing catalog), the lock file (checkouts changed locally), broken links in views and in `.agents/skills`, skills and plugins Claude Code also loads itself, plugin servers waiting for review, harness registrations (skilltri missing, 1MCP still registered, servers registered twice), the shell hook and installed harnesses without an enabled adapter.
 
 ## Not supported yet

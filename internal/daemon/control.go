@@ -186,7 +186,7 @@ func (d *Daemon) control(conn net.Conn, h Hello, herr error) {
 		case "which":
 			result, err = d.which(h)
 		case "update":
-			result, err = d.update(h.Args)
+			result, err = d.update(d.ctx, h.Args)
 		case "restart":
 			err = d.restart(h.Args)
 		case "shutdown":
@@ -214,7 +214,7 @@ func (d *Daemon) restart(args []string) error {
 	if len(args) != 1 || args[0] == "" {
 		return errors.New("restart needs a server name")
 	}
-	if d.cfg.Load().Servers[args[0]] == nil {
+	if d.Config().Servers[args[0]] == nil {
 		return fmt.Errorf("no such server %q", args[0])
 	}
 	d.log.Printf("restart %s requested", args[0])

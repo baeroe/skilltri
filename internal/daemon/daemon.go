@@ -57,6 +57,9 @@ type Options struct {
 	// Wait makes Run wait for the lock instead of returning ErrAlreadyRunning (`daemon --wait`,
 	// used by the login service, so it takes over when a shim-started daemon exits).
 	Wait bool
+	// Tools returns the local tools every session gets (skilltri's agent tools); it is called once,
+	// in New. nil: none.
+	Tools func(*Daemon) gateway.ToolProvider
 }
 
 // Daemon serves sessions and control requests. Create it with New and start it with Run.
@@ -78,7 +81,8 @@ type Daemon struct {
 	configErr string
 	sessions  map[string]*session
 	closing   bool
-	wg        sync.WaitGroup // connection handlers and their helper goroutines
+	tools     gateway.ToolProvider // from Options.Tools; nil: none
+	wg        sync.WaitGroup       // connection handlers and their helper goroutines
 }
 
 // session is one harness connection.
@@ -111,7 +115,11 @@ func New(o Options) *Daemon {
 	if l == nil {
 		l = log.New(io.Discard, "", 0)
 	}
-	return &Daemon{o: o, log: l, sessions: map[string]*session{}, rebuildCh: make(chan struct{}, 1)}
+	d := &Daemon{o: o, log: l, sessions: map[string]*session{}, rebuildCh: make(chan struct{}, 1)}
+	if o.Tools != nil {
+		d.tools = o.Tools(d)
+	}
+	return d
 }
 
 // Run takes the lock, listens on the socket and serves until ctx is cancelled or a shutdown
@@ -261,7 +269,11 @@ func (d *Daemon) handle(conn net.Conn) {
 // serveSession runs one harness MCP session until the client disconnects or the daemon stops.
 func (d *Daemon) serveSession(conn net.Conn, br *bufio.Reader, h Hello) {
 	id := newID()
-	gw := gateway.NewSession(gateway.SessionInfo{ID: id, Dir: h.Dir, SkillsNative: h.SkillsNative}, d.cfg.Load, d.mgr, d.activeSkills)
+	var opts []gateway.SessionOption
+	if d.tools != nil {
+		opts = append(opts, gateway.WithTools(d.tools))
+	}
+	gw := gateway.NewSession(gateway.SessionInfo{ID: id, Dir: h.Dir, SkillsNative: h.SkillsNative}, d.cfg.Load, d.mgr, d.activeSkills, opts...)
 	s := &session{gw: gw, kick: make(chan struct{}, 1), roots: make(chan *mcp.ServerSession, 1)}
 	gw.MCPServer().AddReceivingMiddleware(d.initMiddleware(s, h.DirExplicit))
 	if !d.register(id, s) {

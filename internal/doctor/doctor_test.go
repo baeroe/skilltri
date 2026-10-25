@@ -407,7 +407,7 @@ func TestRunSorted(t *testing.T) {
 		sev = append(sev, f.Severity+"/"+f.Check)
 	}
 	got := strings.Join(sev, ",")
-	want := "error/config,error/views,error/views,warning/daemon,info/adapters,info/shell-hook"
+	want := "error/config,error/views,error/views,warning/daemon,info/adapters,info/agent-access,info/shell-hook"
 	if got != want {
 		t.Errorf("order = %s, want %s", got, want)
 	}
@@ -450,4 +450,18 @@ func TestHarnessDuplicatesCheck(t *testing.T) {
 	write(t, filepath.Join(e.Home, ".claude.json"), `{"mcpServers":{"skilltri":{"command":"skilltri","args":["mcp"]},"docs":{"command":"docs-mcp"}}}`)
 	os.Remove(cursor)
 	expect(t, run(e), "harness-duplicates")
+}
+
+func TestAgentAccessCheck(t *testing.T) {
+	e := newEnv(t)
+	f := expect(t, run(e), "agent-access", [2]string{"info", "settings.agentAccess"}) // default: write
+	if f[0].Message != "agents can change skilltri; see skilltri audit" {
+		t.Errorf("message = %q", f[0].Message)
+	}
+	for _, lvl := range []string{"read", "off"} {
+		write(t, e.ConfigPath, `{"version":1,"servers":{},"settings":{"agentAccess":"`+lvl+`"}}`)
+		expect(t, run(e), "agent-access")
+	}
+	write(t, e.ConfigPath, `{"version":1,"servers":{},"settings":{"agentAccess":"write"}}`)
+	expect(t, run(e), "agent-access", [2]string{"info", "settings.agentAccess"})
 }

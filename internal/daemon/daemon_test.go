@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/baeroe/skilltri/internal/config"
+	"github.com/baeroe/skilltri/internal/gateway"
 	"github.com/baeroe/skilltri/internal/rules"
 	"github.com/baeroe/skilltri/internal/testutil/fakemcp"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -45,8 +46,9 @@ const poll = 50 * time.Millisecond
 type env struct {
 	dir, cfg, sock, lock string
 	connectRefresh       time.Duration
-	tick                 time.Duration // Options.UpdateTick
-	d                    **Daemon      // set by start
+	tick                 time.Duration                      // Options.UpdateTick
+	tools                func(*Daemon) gateway.ToolProvider // Options.Tools
+	d                    **Daemon                           // set by start
 }
 
 func newEnv(t *testing.T) env {
@@ -75,7 +77,7 @@ func isolateDirs(t *testing.T, dir string) {
 }
 
 func (e env) options() Options {
-	return Options{ConfigPath: e.cfg, SocketPath: e.sock, LockPath: e.lock, Version: "test", PollInterval: poll, ConnectRefresh: e.connectRefresh, UpdateTick: e.tick}
+	return Options{ConfigPath: e.cfg, SocketPath: e.sock, LockPath: e.lock, Version: "test", PollInterval: poll, ConnectRefresh: e.connectRefresh, UpdateTick: e.tick, Tools: e.tools}
 }
 
 // writeConfig writes c as the config file and makes sure its mtime moves forward.

@@ -1,11 +1,11 @@
-# Setup tab: harness registration (with a duplicate entry), the shell hook (selected), daemon service, adapters.
+# Setup tab: harness registration (with a duplicate entry), shell hook, daemon service, adapters, agent access and the importers (first one selected).
 Output ".vhs/setup.gif"
 Source "docs/tapes/config.tape"
 
 Hide
 Type "skilltri --tab setup" Enter
 Sleep 3s
-Down 7
+Down 19
 Sleep 500ms
 Show
 Sleep 300ms

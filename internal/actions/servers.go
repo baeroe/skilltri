@@ -44,21 +44,7 @@ func ServerUpdate(e Env, name string, s config.Server) error {
 // ServerRename renames old to new, keeping everything else. A missing old wraps ErrNotFound, an
 // existing new wraps ErrExists; renaming to the same name changes nothing.
 func ServerRename(e Env, old, new string) error {
-	return e.edit(func(c *config.Config) error {
-		s := c.Servers[old]
-		if s == nil {
-			return wrap(ErrNotFound, "no such server %q", old)
-		}
-		if old == new {
-			return nil
-		}
-		if c.Servers[new] != nil {
-			return wrap(ErrExists, "server %q already exists", new)
-		}
-		c.Servers[new] = s
-		delete(c.Servers, old)
-		return nil
-	})
+	return ServerPatch(e, old, new, func(*config.Server) error { return nil })
 }
 
 // ServerRemove removes the server name. A missing server wraps ErrNotFound.
@@ -67,6 +53,31 @@ func ServerRemove(e Env, name string) error {
 		if c.Servers[name] == nil {
 			return wrap(ErrNotFound, "no such server %q", name)
 		}
+		delete(c.Servers, name)
+		return nil
+	})
+}
+
+// ServerPatch changes the server name in one config edit: fn changes it in place (any field,
+// Disabled included), then it is renamed to newName unless that is empty or name. A missing
+// server wraps ErrNotFound, a taken newName ErrExists; when fn, the rename or the validation
+// fails, nothing is written.
+func ServerPatch(e Env, name, newName string, fn func(*config.Server) error) error {
+	return e.edit(func(c *config.Config) error {
+		s := c.Servers[name]
+		if s == nil {
+			return wrap(ErrNotFound, "no such server %q", name)
+		}
+		if err := fn(s); err != nil {
+			return err
+		}
+		if newName == "" || newName == name {
+			return nil
+		}
+		if c.Servers[newName] != nil {
+			return wrap(ErrExists, "server %q already exists", newName)
+		}
+		c.Servers[newName] = s
 		delete(c.Servers, name)
 		return nil
 	})

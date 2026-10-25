@@ -34,6 +34,24 @@ type Config struct {
 type Settings struct {
 	IdleTimeoutSec int      `json:"idleTimeoutSec,omitempty"` // 0 → 600
 	Adapters       []string `json:"adapters,omitempty"`       // enabled adapter ids; nil → ["claude-code"]
+	// AgentAccess is what skilltri's own management tools (skilltri_*) offer agents: "off", "read"
+	// or "write"; "" → "write" (see (*Config).AgentAccess). The skill fallback tools are not affected.
+	AgentAccess string `json:"agentAccess,omitempty"`
+}
+
+// The settings.agentAccess values.
+const (
+	AgentAccessOff   = "off"
+	AgentAccessRead  = "read"
+	AgentAccessWrite = "write"
+)
+
+// AgentAccess returns settings.agentAccess; the default is "write".
+func (c *Config) AgentAccess() string {
+	if c.Settings.AgentAccess == "" {
+		return AgentAccessWrite
+	}
+	return c.Settings.AgentAccess
 }
 
 // ReservedName is not allowed as a server name: it is the tool prefix of the skill fallback.
@@ -231,6 +249,11 @@ func Update(path string, fn func(*Config) error) error {
 func (c *Config) Validate() error {
 	if c.Version != 1 {
 		return fmt.Errorf("unsupported config version %d", c.Version)
+	}
+	switch c.Settings.AgentAccess {
+	case "", AgentAccessOff, AgentAccessRead, AgentAccessWrite:
+	default:
+		return fmt.Errorf("settings: agentAccess %q (want off, read or write)", c.Settings.AgentAccess)
 	}
 	names := make([]string, 0, len(c.Servers))
 	for n := range c.Servers {
