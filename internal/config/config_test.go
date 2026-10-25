@@ -289,3 +289,23 @@ func TestConnKeyIgnoresOrigin(t *testing.T) {
 		t.Fatal("origin must not change the ConnKey")
 	}
 }
+
+func TestAgentAccess(t *testing.T) {
+	c := &Config{Version: 1}
+	if got := c.AgentAccess(); got != AgentAccessWrite {
+		t.Fatalf("default = %q, want write", got)
+	}
+	for _, v := range []string{"", "off", "read", "write"} {
+		c.Settings.AgentAccess = v
+		if err := c.Validate(); err != nil {
+			t.Fatalf("agentAccess %q: %v", v, err)
+		}
+		if v != "" && c.AgentAccess() != v {
+			t.Fatalf("AgentAccess() = %q, want %q", c.AgentAccess(), v)
+		}
+	}
+	c.Settings.AgentAccess = "admin"
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "agentAccess") {
+		t.Fatalf("invalid agentAccess: err = %v", err)
+	}
+}

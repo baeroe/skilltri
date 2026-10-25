@@ -53,3 +53,6 @@ func DaemonLock() string { return filepath.Join(StateDir(), "daemon.lock") }
 
 // LogFile is the daemon log.
 func LogFile() string { return filepath.Join(StateDir(), "daemon.log") }
+
+// AuditLog is the log of the agent tools' write calls (one JSON object per line).
+func AuditLog() string { return filepath.Join(StateDir(), "audit.jsonl") }

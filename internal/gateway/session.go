@@ -37,13 +37,14 @@ type SessionInfo struct {
 // Session is one harness connection: an mcp.Server whose tools, prompts and resources are the
 // active downstream ones, proxied by name. It is safe for concurrent use.
 type Session struct {
-	id     string // info.ID, immutable
-	cfg    func() *config.Config
-	mgr    *downstream.Manager
-	skills func(dir string) []catalog.Entry // active skills for a folder; nil: no skill fallback
-	server *mcp.Server
-	ctx    context.Context // cancelled by Close; aborts a running Refresh
-	cancel context.CancelFunc
+	id       string // info.ID, immutable
+	cfg      func() *config.Config
+	mgr      *downstream.Manager
+	skills   func(dir string) []catalog.Entry // active skills for a folder; nil: no skill fallback
+	provider ToolProvider                     // local tools (WithTools); nil: none
+	server   *mcp.Server
+	ctx      context.Context // cancelled by Close; aborts a running Refresh
+	cancel   context.CancelFunc
 
 	refreshMu sync.Mutex // serializes Refresh; the registered maps below are owned by it
 	tools     map[string]registered
@@ -68,8 +69,8 @@ type registered struct {
 // instructions and on every skill tool call (with the current folder), so calls see the current
 // catalog and config. The instructions list the skills
 // active in info.Dir only when info.SkillsNative is empty, since they are fixed before the client
-// name is known.
-func NewSession(info SessionInfo, cfg func() *config.Config, mgr *downstream.Manager, skills func(dir string) []catalog.Entry) *Session {
+// name is known. Options add local tools (WithTools).
+func NewSession(info SessionInfo, cfg func() *config.Config, mgr *downstream.Manager, skills func(dir string) []catalog.Entry, opts ...SessionOption) *Session {
 	info.Dir = rules.Normalize(info.Dir)
 	var names []string
 	for _, d := range Servers(cfg(), info.Dir) {
@@ -91,6 +92,9 @@ func NewSession(info SessionInfo, cfg func() *config.Config, mgr *downstream.Man
 		id: info.ID, cfg: cfg, mgr: mgr, skills: skills, info: info,
 		tools: map[string]registered{}, prompts: map[string]registered{}, resources: map[string]registered{},
 		active: map[string]bool{}, last: newWanted(),
+	}
+	for _, o := range opts {
+		o(s)
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.server = mcp.NewServer(&mcp.Implementation{Name: "skilltri", Version: Version}, &mcp.ServerOptions{
@@ -153,7 +157,7 @@ func (s *Session) Close() {
 type wanted struct {
 	tools     map[string]*mcp.Tool
 	toolSrc   map[string]route
-	local     map[string]mcp.ToolHandler // tools served by the session itself (skill fallback)
+	local     map[string]mcp.ToolHandler // tools served by the session itself (skill fallback, local tools)
 	prompts   map[string]*mcp.Prompt
 	promptSrc map[string]route
 	resources map[string]*mcp.Resource // by URI
@@ -219,6 +223,7 @@ func (s *Session) Refresh(ctx context.Context) error {
 	}
 	w := newWanted()
 	s.addSkillTools(info, w)
+	s.addLocalTools(cfg, info, w)
 	for i, name := range names { // sorted, so the first server by name wins a collision
 		l := lists[i]
 		switch {

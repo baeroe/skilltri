@@ -186,7 +186,7 @@ func (d *Daemon) control(conn net.Conn, h Hello, herr error) {
 		case "which":
 			result, err = d.which(h)
 		case "update":
-			result, err = d.update(h.Args)
+			result, err = d.update(d.ctx, h.Args)
 		case "restart":
 			err = d.restart(h.Args)
 		case "shutdown":

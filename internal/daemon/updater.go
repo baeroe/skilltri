@@ -137,12 +137,13 @@ func (d *Daemon) requestRebuild() {
 }
 
 // update answers the "update" control command. Concurrent updates run one after another.
-func (d *Daemon) update(names []string) (UpdateReply, error) {
+func (d *Daemon) update(ctx context.Context, names []string) (UpdateReply, error) {
 	if !d.haveConfig.Load() {
 		return UpdateReply{}, errNoConfig
 	}
-	ctx, cancel := context.WithTimeout(d.ctx, updateTimeout)
+	ctx, cancel := context.WithTimeout(ctx, updateTimeout)
 	defer cancel()
+	defer context.AfterFunc(d.ctx, cancel)() // shutdown aborts the update
 	d.updMu.Lock()
 	defer d.updMu.Unlock()
 	r, c := Update(ctx, d.o.Builder, d.cfg.Load(), names)

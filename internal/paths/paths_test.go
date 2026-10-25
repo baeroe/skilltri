@@ -94,3 +94,11 @@ func TestDerivedFiles(t *testing.T) {
 		t.Errorf("LogFile %q", got)
 	}
 }
+
+func TestAuditLog(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("SKILLTRI_STATE_DIR", "/s")
+	if got := AuditLog(); got != filepath.Join("/s", "audit.jsonl") {
+		t.Fatalf("AuditLog() = %q", got)
+	}
+}

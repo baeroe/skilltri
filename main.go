@@ -20,6 +20,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/baeroe/skilltri/internal/adapters"
+	"github.com/baeroe/skilltri/internal/agentbackend"
 	"github.com/baeroe/skilltri/internal/cli"
 	"github.com/baeroe/skilltri/internal/config"
 	"github.com/baeroe/skilltri/internal/daemon"
@@ -30,6 +31,7 @@ import (
 	"github.com/baeroe/skilltri/internal/secrets"
 	"github.com/baeroe/skilltri/internal/service"
 	"github.com/baeroe/skilltri/internal/shim"
+	"github.com/baeroe/skilltri/internal/skilllock"
 	"github.com/baeroe/skilltri/internal/tui"
 )
 
@@ -169,6 +171,7 @@ func runDaemon(args []string) int {
 	gateway.Version = version
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	home, _ := os.UserHomeDir()
 	d := daemon.New(daemon.Options{
 		ConfigPath: paths.ConfigFile(),
 		SocketPath: paths.SocketPath(),
@@ -176,6 +179,14 @@ func runDaemon(args []string) int {
 		Version:    version,
 		Logger:     log.New(os.Stderr, "skilltri daemon: ", log.LstdFlags),
 		Wait:       wait,
+		Tools: agentbackend.Tools(agentbackend.Options{
+			ConfigPath: paths.ConfigFile(),
+			Socket:     paths.SocketPath(),
+			Home:       home,
+			CacheDir:   paths.CacheDir(),
+			StatePath:  skilllock.Path(),
+			Environ:    os.Environ(),
+		}),
 	})
 	if err := d.Run(ctx); err != nil {
 		if errors.Is(err, daemon.ErrAlreadyRunning) {

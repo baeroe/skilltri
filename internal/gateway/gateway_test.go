@@ -111,9 +111,16 @@ func connectHarness(t *testing.T, cfg *config.Config, info SessionInfo, skills f
 		return s, ok
 	}})
 	t.Cleanup(h.mgr.Close)
-	ctx := context.Background()
 	h.sess = NewSession(info, h.cfg.Load, h.mgr, skills)
 	t.Cleanup(h.sess.Close)
+	connectSession(t, h)
+	return h
+}
+
+// connectSession refreshes h.sess and connects a client to it, recording list_changed in h.changed.
+func connectSession(t *testing.T, h *harness) {
+	t.Helper()
+	ctx := context.Background()
 	if err := h.sess.Refresh(ctx); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
@@ -134,7 +141,6 @@ func connectHarness(t *testing.T, cfg *config.Config, info SessionInfo, skills f
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { h.cs.Close() })
-	return h
 }
 
 func (h *harness) tools(t *testing.T) []string {
