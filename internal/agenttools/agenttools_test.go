@@ -3,6 +3,7 @@ package agenttools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -35,7 +36,8 @@ type demoBackend struct {
 	cfg *config.Config
 	cat *catalog.Catalog
 
-	status []ServerStatus // nil: the default demo states
+	status   []ServerStatus // nil: the default demo states
+	whichErr error
 
 	env        actions.Env // where write tools edit the config (writeBackend)
 	auditPath  string
@@ -85,6 +87,9 @@ func (b *demoBackend) Status() Status {
 	}}
 }
 func (b *demoBackend) Which(dir string) (Which, error) {
+	if b.whichErr != nil {
+		return Which{}, b.whichErr
+	}
 	b.mu.Lock()
 	b.whichDirs = append(b.whichDirs, dir)
 	b.mu.Unlock()
@@ -376,9 +381,11 @@ func TestMaskURL(t *testing.T) {
 
 func TestMaskArgs(t *testing.T) {
 	in := []string{"-y", "demo-pkg", "--api-key", "abc", "--auth-token=def", "--password=${secret:pw}", "-secret", "ghi",
-		"--client-secret=", "--port=8080", "--verbose", "https://u:p@h.test/?q=1", "--token", "--next"}
+		"--client-secret=", "--port=8080", "--verbose", "https://u:p@h.test/?q=1", "--token", "--next",
+		"--endpoint=https://u:p@h.test/?q=1", "-e", "GITHUB_TOKEN=jkl", "MODE=demo", "DB=postgres://u:pw@db/x?sslkey=k"}
 	want := []string{"-y", "demo-pkg", "--api-key", "•••", "--auth-token=•••", "--password=${secret:pw}", "-secret", "•••",
-		"--client-secret=", "--port=8080", "--verbose", "https://•••@h.test/?q=•••", "--token", "--next"}
+		"--client-secret=", "--port=8080", "--verbose", "https://•••@h.test/?q=•••", "--token", "--next",
+		"--endpoint=https://•••@h.test/?q=•••", "-e", "GITHUB_TOKEN=•••", "MODE=demo", "DB=postgres://•••@db/x?sslkey=•••"}
 	if got := MaskArgs(in); !slices.Equal(got, want) {
 		t.Fatalf("MaskArgs = %q\nwant %q", got, want)
 	}
@@ -418,5 +425,38 @@ func TestRelativeDirJoinsSessionDir(t *testing.T) {
 	}
 	if want := `"dir": "` + rules.Normalize(filepath.Dir(dir)) + `"`; !strings.Contains(text, want) {
 		t.Fatalf("list_skills dir: want %s in %s", want, text)
+	}
+}
+
+func TestMaskTextFlagURL(t *testing.T) {
+	s := &config.Server{Args: []string{"--database-url=postgres://admin:demo-db-pass@db.test/x?sslkey=demo-ssl-key", "-e", "GITHUB_TOKEN=demo-gh-token"}}
+	got := maskText("connect demo-db-pass failed (demo-ssl-key, demo-gh-token)", s)
+	if want := "connect ••• failed (•••, •••)"; got != want {
+		t.Fatalf("maskText = %q, want %q", got, want)
+	}
+}
+
+func TestWhichError(t *testing.T) {
+	b := newDemoBackend()
+	b.whichErr = errors.New("which needs a folder")
+	text, isErr := call(t, b, Call{Dir: "/"}, "skilltri_which", map[string]any{})
+	if !isErr || text != "which needs a folder" {
+		t.Fatalf("which = %q, isError %v", text, isErr)
+	}
+}
+
+func TestSourceURLsAndErrorsMasked(t *testing.T) {
+	b := newDemoBackend()
+	b.cfg.Sources["git"] = &config.Source{Type: "git", URL: "https://demo-git-token@git.example.test/demo/skills.git"}
+	b.cfg.Sources["scp"] = &config.Source{Type: "git", URL: "git@git.example.test:demo/skills.git"}
+	b.cat.Sources = append(b.cat.Sources, catalog.SourceState{Name: "git", Error: "clone https://demo-git-token@git.example.test/demo/skills.git: denied"})
+	for _, name := range []string{"skilltri_list_sources", "skilltri_get_status"} {
+		text, _ := call(t, b, Call{Dir: "/"}, name, map[string]any{})
+		if strings.Contains(text, "demo-git-token") || !strings.Contains(text, "https://•••@git.example.test/demo/skills.git") {
+			t.Errorf("%s: %s", name, text)
+		}
+	}
+	if text, _ := call(t, b, Call{Dir: "/"}, "skilltri_list_sources", map[string]any{}); !strings.Contains(text, `"url": "git@git.example.test:demo/skills.git"`) {
+		t.Errorf("scp-like url changed: %s", text)
 	}
 }

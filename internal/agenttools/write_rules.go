@@ -158,12 +158,17 @@ func removeRule(_ context.Context, b Backend, c Call, args json.RawMessage, ch *
 		return fmt.Errorf("rule %d of %s is %q, not %q: list the rules again", a.Index, t, ruleText(got), ruleText(want))
 	}
 	next := slices.Delete(slices.Clone(cur), a.Index-1, a.Index)
+	beforeRuleSet()
 	if err := actions.RuleSet(e, t, cur, next); err != nil {
 		return err
 	}
 	ch.message = fmt.Sprintf("Removed rule %d (%s) of %s.%s", a.Index, ruleText(want), t, applied)
 	return nil
 }
+
+// beforeRuleSet runs between reading a rule list and writing it back (tests change the config
+// there to simulate a concurrent edit).
+var beforeRuleSet = func() {}
 
 // setRulesAttempts bounds the retries of skilltri_set_rules when another edit changes the list
 // between reading and writing it.
@@ -192,6 +197,7 @@ func setRules(_ context.Context, b Backend, c Call, args json.RawMessage, ch *ch
 		if err != nil {
 			return err
 		}
+		beforeRuleSet()
 		err = actions.RuleSet(e, t, cur, rs)
 		if err == nil {
 			break

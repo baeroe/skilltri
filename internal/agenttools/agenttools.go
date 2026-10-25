@@ -229,30 +229,46 @@ type change struct {
 	secrets  []string // literal values of the call, kept out of every text
 }
 
-// writeTool is a write tool: run does the change, then the call is audited (success or failure)
-// and answered with the confirmation and warnings, or with the error as an IsError result.
-func writeTool(def *mcp.Tool, run func(ctx context.Context, b Backend, c Call, args json.RawMessage, ch *change) error) Tool {
-	def.Description += effect
+// writeTool is a write tool that changes the config (its description ends with effect).
+func writeTool(def *mcp.Tool, run runFunc) Tool { return writeToolNote(def, effect, run) }
+
+type runFunc func(ctx context.Context, b Backend, c Call, args json.RawMessage, ch *change) error
+
+// scrubMin is the shortest literal scrubbed from confirmations and summaries; shorter values
+// would garble names there (error texts are scrubbed of every literal of 3 bytes or more).
+const scrubMin = 8
+
+// writeToolNote is a write tool whose description ends with note: run does the change, then the
+// call is audited (success or failure) and answered with the confirmation and warnings, or with
+// the error as an IsError result.
+func writeToolNote(def *mcp.Tool, note string, run runFunc) Tool {
+	def.Description += note
 	return Tool{Def: def, Write: true, Handle: func(ctx context.Context, b Backend, c Call, args json.RawMessage) (*mcp.CallToolResult, error) {
 		var ch change
 		err := run(ctx, b, c, args, &ch)
-		scrub := func(s string) string {
+		scrub := func(s string, min int) string {
 			for _, v := range ch.secrets {
-				s = strings.ReplaceAll(s, v, mask)
+				if len(v) >= min {
+					s = strings.ReplaceAll(s, v, mask)
+				}
 			}
 			return s
 		}
-		e := audit.Entry{Tool: def.Name, Target: ch.target, Summary: scrub(ch.summary), Client: c.Client, Dir: c.Dir, OK: err == nil}
+		e := audit.Entry{Tool: def.Name, Target: ch.target, Summary: scrub(ch.summary, scrubMin), Client: c.Client, Dir: c.Dir, OK: err == nil}
 		if err != nil {
-			e.Error = scrub(err.Error())
+			e.Error = scrub(err.Error(), 0)
 		}
 		aerr := audit.Append(b.AuditLog(), e)
 		if err != nil {
-			return errorResult(errors.New(e.Error)), nil
+			text := e.Error
+			if aerr != nil {
+				text += "\n(the audit log could not be written: " + aerr.Error() + ")"
+			}
+			return errorResult(errors.New(text)), nil
 		}
-		lines := []string{scrub(ch.message)}
+		lines := []string{scrub(ch.message, scrubMin)}
 		for _, w := range ch.warnings {
-			lines = append(lines, "warning: "+scrub(w))
+			lines = append(lines, "warning: "+scrub(w, scrubMin))
 		}
 		if aerr != nil {
 			lines = append(lines, "warning: the audit log could not be written: "+aerr.Error())

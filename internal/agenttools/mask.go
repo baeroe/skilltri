@@ -54,31 +54,74 @@ func maskQueryValue(v string) string {
 }
 
 // MaskArgs shows server arguments to agents: the value of a secret-looking flag ("--api-key=x",
-// "--auth-token x", "-secret x", "--password=x") becomes "•••" (${secret:…} references stay), and
-// URL arguments are shown like MaskURL. A nil slice stays nil.
+// "--auth-token x", "-secret x", "--password=x") and of a secret-looking positional NAME=value
+// ("GITHUB_TOKEN=x", as in docker -e) becomes "•••" (${secret:…} references stay); URL arguments
+// and URL flag values ("--endpoint=https://…") are shown like MaskURL. A nil slice stays nil.
 func MaskArgs(args []string) []string {
+	out, _ := maskArgs(args)
+	return out
+}
+
+// envName matches the NAME of a positional NAME=value argument.
+var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]*$`)
+
+// maskArgs is MaskArgs plus the literal secret values it hid.
+func maskArgs(args []string) (out []string, lits []string) {
 	if args == nil {
-		return nil
+		return nil, nil
 	}
-	out := slices.Clone(args)
+	out = slices.Clone(args)
 	for i := 0; i < len(out); i++ {
 		a := out[i]
 		if isURL(a) {
 			out[i] = MaskURL(a)
+			lits = append(lits, urlLiterals(a)...)
 			continue
 		}
-		name, ok := flagName(a)
-		if !ok || !secretFlag.MatchString(name) {
-			continue
-		}
-		if k, v, has := strings.Cut(a, "="); has {
+		k, v, hasValue := strings.Cut(a, "=")
+		name, isFlag := flagName(a)
+		switch {
+		case hasValue && (isFlag || envName.MatchString(k)) && isURL(v):
+			out[i] = k + "=" + MaskURL(v)
+			lits = append(lits, urlLiterals(v)...)
+		case hasValue && (isFlag || envName.MatchString(k)) && secretFlag.MatchString(strings.TrimLeft(k, "-")):
 			out[i] = k + "=" + MaskValue(v)
-		} else if i+1 < len(out) && !strings.HasPrefix(out[i+1], "-") {
+			lits = append(lits, v)
+		case !hasValue && isFlag && secretFlag.MatchString(name) && i+1 < len(out) && !strings.HasPrefix(out[i+1], "-"):
 			i++
+			lits = append(lits, out[i])
 			out[i] = MaskValue(out[i])
 		}
 	}
+	return out, lits
+}
+
+// urlLiterals are the secret parts of a URL: userinfo, password and query values.
+func urlLiterals(raw string) []string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return []string{raw}
+	}
+	var out []string
+	if u.User != nil {
+		out = append(out, u.User.String())
+		if p, ok := u.User.Password(); ok {
+			out = append(out, p)
+		}
+	}
+	for _, vs := range u.Query() {
+		out = append(out, vs...)
+	}
 	return out
+}
+
+// maskSourceURL masks a source URL that has a scheme (https://token@host/…); shorthands such as
+// owner/repo and scp-like git@host:path stay as they are.
+func maskSourceURL(u string) string {
+	if isURL(u) {
+		return MaskURL(u)
+	}
+	return u
 }
 
 // flagName is the name of a "-x" or "--x[=v]" argument without dashes and value.
@@ -131,34 +174,13 @@ func secretLiterals(s *config.Server) []string {
 			add(v)
 		}
 	}
-	masked := MaskArgs(s.Args)
-	for i, a := range s.Args {
-		if masked[i] != a && !isURL(a) {
-			if _, v, ok := strings.Cut(a, "="); ok && strings.HasPrefix(a, "-") {
-				add(v)
-			} else {
-				add(a)
-			}
-		}
+	_, lits := maskArgs(s.Args)
+	for _, v := range lits {
+		add(v)
 	}
-	for _, raw := range append(slices.Clone(s.Args), s.URL) {
-		if !isURL(raw) {
-			continue
-		}
-		u, err := url.Parse(raw)
-		if err != nil {
-			continue
-		}
-		if u.User != nil {
-			add(u.User.String())
-			if p, ok := u.User.Password(); ok {
-				add(p)
-			}
-		}
-		for _, vs := range u.Query() {
-			for _, v := range vs {
-				add(v)
-			}
+	if isURL(s.URL) {
+		for _, v := range urlLiterals(s.URL) {
+			add(v)
 		}
 	}
 	slices.SortFunc(out, func(a, b string) int {

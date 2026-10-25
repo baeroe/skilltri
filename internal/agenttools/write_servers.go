@@ -31,11 +31,11 @@ func init() {
 			Description: "Remove an MCP server from skilltri's config (with its rules and tool settings); its tools disappear from every session.",
 			InputSchema: required(object(map[string]any{"name": str("Server name")}), "name"),
 		}, removeServer),
-		writeTool(&mcp.Tool{
+		writeToolNote(&mcp.Tool{
 			Name:        "skilltri_restart_server",
-			Description: "Restart an MCP server: every running instance is stopped and the next use starts a fresh process (the config is not changed).",
+			Description: "Restart an MCP server: every running instance is stopped at once, so calls in flight in every session fail, and the next use starts a fresh process.",
 			InputSchema: required(object(map[string]any{"name": str("Server name")}), "name"),
-		}, restartServer),
+		}, restartNote, restartServer),
 		writeTool(&mcp.Tool{
 			Name:        "skilltri_set_adapter",
 			Description: "Enable or disable a harness adapter in settings.adapters (claude-code, codex, gemini-cli, opencode, cursor, github-copilot, amp). At least one adapter stays enabled.",
@@ -53,6 +53,9 @@ func init() {
 		}, acceptPluginServer),
 	)
 }
+
+// restartNote ends the restart tool's description (it changes no config).
+const restartNote = " The config is not changed; the call is recorded in skilltri's audit log."
 
 func serverProps(update bool) map[string]any {
 	p := map[string]any{

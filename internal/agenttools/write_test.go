@@ -17,6 +17,7 @@ import (
 	"github.com/baeroe/skilltri/internal/config"
 	"github.com/baeroe/skilltri/internal/rules"
 	"github.com/baeroe/skilltri/internal/sources"
+	"github.com/baeroe/skilltri/internal/target"
 )
 
 const writeLiteral = "demo-write-literal-value"
@@ -123,7 +124,11 @@ func TestWriteToolsOnlyWithWriteAccess(t *testing.T) {
 		if tl, ok := all[n]; !ok || !tl.Write {
 			t.Errorf("%s missing or not a write tool", n)
 		}
-		if !strings.Contains(all[n].Def.Description, "within seconds") {
+		if wantNote := "within seconds"; n == "skilltri_restart_server" {
+			if !strings.Contains(all[n].Def.Description, "config is not changed") {
+				t.Errorf("%s: description misses its effect note", n)
+			}
+		} else if !strings.Contains(all[n].Def.Description, wantNote) {
 			t.Errorf("%s: description does not say how sessions get the change", n)
 		}
 	}
@@ -407,5 +412,88 @@ func TestPluginServerTools(t *testing.T) {
 	lastAudit(t, b, "skilltri_accept_plugin_server", "server/writing-notes", true)
 	if s := b.load(t).Servers["writing-notes"]; s.Env["MODE"] != "changed" {
 		t.Fatalf("after accept: %+v", s)
+	}
+}
+
+// A rule list changed between reading and writing (another session, the TUI) fails remove_rule
+// with ErrChanged and leaves that other change in place.
+func TestRemoveRuleConcurrentChange(t *testing.T) {
+	b := writeBackend(t)
+	t.Cleanup(func() { beforeRuleSet = func() {} })
+	beforeRuleSet = func() {
+		if _, err := actions.RuleAdd(b.env, mustTarget(t, "server/demo"), rules.Rule{Path: "/other", Mode: rules.Only}); err != nil {
+			t.Error(err)
+		}
+	}
+	text, isErr := call(t, b, demoCall, "skilltri_remove_rule", map[string]any{"target": "server/demo", "index": 1, "mode": "tree", "path": "/work/demo"})
+	if !isErr || !strings.Contains(text, "changed meanwhile") {
+		t.Fatalf("result = %q, isError %v", text, isErr)
+	}
+	if got := b.load(t).Servers["demo"].Rules; len(got) != 2 {
+		t.Fatalf("rules = %v", got)
+	}
+	lastAudit(t, b, "skilltri_remove_rule", "server/demo", false)
+}
+
+// set_rules retries when the list changed in between and then replaces it.
+func TestSetRulesRetry(t *testing.T) {
+	b := writeBackend(t)
+	t.Cleanup(func() { beforeRuleSet = func() {} })
+	calls := 0
+	beforeRuleSet = func() {
+		calls++
+		if calls == 1 {
+			if _, err := actions.RuleAdd(b.env, mustTarget(t, "server/demo"), rules.Rule{Path: "/other", Mode: rules.Only}); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	mustWrite(t, b, "skilltri_set_rules", map[string]any{"target": "server/demo", "rules": []map[string]string{{"mode": "only", "path": "/a"}}})
+	if got := b.load(t).Servers["demo"].Rules; calls != 2 || !equalRules(got, []rules.Rule{{Path: "/a", Mode: rules.Only}}) {
+		t.Fatalf("calls %d, rules %v", calls, got)
+	}
+}
+
+func mustTarget(t *testing.T, s string) target.Target {
+	t.Helper()
+	tg, err := target.Parse(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tg
+}
+
+// A failed call whose audit line cannot be written says so in its error.
+func TestAuditFailureInError(t *testing.T) {
+	b := writeBackend(t)
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b.auditPath = filepath.Join(file, "audit.jsonl")
+	text, isErr := call(t, b, demoCall, "skilltri_remove_server", map[string]any{"name": "nope"})
+	if !isErr || !strings.Contains(text, `no such server "nope"`) || !strings.Contains(text, "audit log could not be written") {
+		t.Fatalf("result = %q, isError %v", text, isErr)
+	}
+	text = mustWrite(t, b, "skilltri_remove_server", map[string]any{"name": "demo"})
+	if !strings.Contains(text, "warning: the audit log could not be written") {
+		t.Fatalf("result = %q", text)
+	}
+}
+
+// Short literal values are not scrubbed from confirmations, where they would garble names;
+// error texts are scrubbed of them.
+func TestShortLiteralsKeepConfirmations(t *testing.T) {
+	b := writeBackend(t)
+	text := mustWrite(t, b, "skilltri_add_server", map[string]any{"name": "docs", "type": "stdio", "command": "x", "env": map[string]string{"K": "docs"}})
+	if !strings.Contains(text, `"docs"`) {
+		t.Fatalf("confirmation garbled: %s", text)
+	}
+	if e := lastAudit(t, b, "skilltri_add_server", "server/docs", true); !strings.Contains(e.Summary, "env [K]") {
+		t.Fatalf("summary = %q", e.Summary)
+	}
+	text, _ = call(t, b, demoCall, "skilltri_add_server", map[string]any{"name": "demo", "type": "stdio", "command": "x", "env": map[string]string{"K": "demo"}})
+	if strings.Contains(text, "demo") {
+		t.Fatalf("error text shows the literal: %s", text)
 	}
 }

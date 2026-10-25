@@ -99,7 +99,9 @@ func getStatus(_ context.Context, b Backend, _ Call, args json.RawMessage) (*mcp
 	out.Daemon.PID, out.Daemon.Version, out.Daemon.ConfigError = st.PID, st.Version, st.ConfigError
 	out.Sources = []sourceStateView{}
 	for _, s := range b.Catalog().Sources {
-		out.Sources = append(out.Sources, sourceStateView(s))
+		v := sourceStateView(s)
+		v.Error = maskText(v.Error, nil)
+		out.Sources = append(out.Sources, v)
 	}
 	out.Sources = sortedBy(out.Sources, func(s sourceStateView) string { return s.Name })
 	return jsonResult(out)
@@ -272,8 +274,8 @@ func listSources(_ context.Context, b Backend, _ Call, args json.RawMessage) (*m
 			continue
 		}
 		st := states[name]
-		v := sourceView{Name: name, Type: s.Type, URL: s.URL, Path: s.Path, Ref: s.Ref, Subpath: s.Subpath,
-			Disabled: s.Disabled, Rules: s.Rules, Commit: st.Commit, Error: st.Error, FetchedAt: st.FetchedAt}
+		v := sourceView{Name: name, Type: s.Type, URL: maskSourceURL(s.URL), Path: s.Path, Ref: s.Ref, Subpath: s.Subpath,
+			Disabled: s.Disabled, Rules: s.Rules, Commit: st.Commit, Error: maskText(st.Error, nil), FetchedAt: st.FetchedAt}
 		switch d, err := s.Interval(); {
 		case err != nil:
 			v.UpdateEvery = s.UpdateEvery
@@ -311,7 +313,7 @@ func plugins(source string, s *config.Source, cat *catalog.Catalog, states map[s
 	out := []pluginView{}
 	for _, entry := range sortedKeys(loaded) {
 		st := states[source+"/plugins/"+entry]
-		v := pluginView{Name: entry, Enabled: s.PluginEnabled(entry), Loaded: loaded[entry], Commit: st.Commit, Error: st.Error}
+		v := pluginView{Name: entry, Enabled: s.PluginEnabled(entry), Loaded: loaded[entry], Commit: st.Commit, Error: maskText(st.Error, nil)}
 		if n := s.Plugins[entry]; n != nil {
 			v.Rules = n.Rules
 		}
