@@ -401,12 +401,15 @@ func enablePluginServer(_ context.Context, b Backend, c Call, args json.RawMessa
 	}
 	name, err := actions.PluginServerEnable(callEnv(b, c), a.Ref, a.Name)
 	if err != nil {
-		return err
+		return errors.New(cliFlagText.Replace(err.Error()))
 	}
 	ch.summary = "enable plugin server as " + name
 	ch.message = fmt.Sprintf("Enabled plugin server %s as server %q.%s", a.Ref, name, applied)
 	return nil
 }
+
+// cliFlagText turns the CLI hints of plugin server errors into the tool's argument name.
+var cliFlagText = strings.NewReplacer("(use --name)", "(pass another name argument)", "(choose another with --name)", "(choose another with the name argument)")
 
 func acceptPluginServer(_ context.Context, b Backend, c Call, args json.RawMessage, ch *change) error {
 	name, err := nameArg(args, ch)

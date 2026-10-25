@@ -27,7 +27,7 @@ func init() {
 		}, Handle: getStatus},
 		Tool{Def: &mcp.Tool{
 			Name:        "skilltri_which",
-			Description: "Show what a session in a folder gets: every MCP server, its tools and every skill, each active or not with the deciding reason (rules, disabled flags)." + readOnly,
+			Description: "Show what a session in a folder gets: every MCP server, its tools and every skill, each active or not with the deciding reason (rules, disabled flags); changes no configuration (may start servers to list their tools).",
 			InputSchema: object(map[string]any{"dir": str("Folder to decide for (default: this session's folder)")}),
 		}, Handle: which},
 		Tool{Def: &mcp.Tool{

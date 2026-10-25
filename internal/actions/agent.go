@@ -9,6 +9,7 @@ import (
 	"github.com/baeroe/skilltri/internal/catalog"
 	"github.com/baeroe/skilltri/internal/config"
 	"github.com/baeroe/skilltri/internal/fsutil"
+	"github.com/baeroe/skilltri/internal/paths"
 	"github.com/baeroe/skilltri/internal/skills"
 )
 
@@ -54,8 +55,15 @@ func SkillWrite(e Env, id, content string) error {
 	if len(content) > MaxSkillFile {
 		return fmt.Errorf("SKILL.md is larger than the 256 KiB limit")
 	}
+	checkouts := []string{filepath.Join(paths.DataDir(), "sources")}
+	if b := e.builder(); b.Fetcher != nil && b.Fetcher.Root != "" {
+		checkouts = append(checkouts, b.Fetcher.Root)
+	}
+	if err := checkWritable(entry.Skill.Dir, src.Path, checkouts); err != nil {
+		return fmt.Errorf("skill %q: %w", id, err)
+	}
 	folder := filepath.Base(entry.Skill.Dir)
-	if err := checkSkillMD(folder, content); err != nil {
+	if err := CheckSkillMD(folder, content); err != nil {
 		return err
 	}
 	path := filepath.Join(entry.Skill.Dir, "SKILL.md")
@@ -66,9 +74,53 @@ func SkillWrite(e Env, id, content string) error {
 	return fsutil.WriteFileAtomic(path, []byte(content), perm)
 }
 
-// checkSkillMD parses content as the SKILL.md of a folder named folder in a temp folder and fails
+// checkWritable refuses writing dir/SKILL.md when dir resolves (through symlinks) outside the
+// source folder root, when root lies in one of skilltri's checkout folders (a local source over
+// a git or marketplace checkout, replaced on update) or when SKILL.md is a symlink.
+func checkWritable(dir, root string, checkouts []string) error {
+	root = expandHome(root)
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return err
+	}
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return err
+	}
+	if !within(realDir, realRoot) {
+		return fmt.Errorf("its folder resolves to %s, outside the source folder %s", realDir, root)
+	}
+	for _, c := range checkouts {
+		if rc, err := filepath.EvalSymlinks(c); err == nil {
+			c = rc
+		}
+		if within(realRoot, filepath.Clean(c)) {
+			return fmt.Errorf("the source folder %s is inside skilltri's checkouts (%s), which are replaced on update", root, c)
+		}
+	}
+	if fi, err := os.Lstat(filepath.Join(dir, "SKILL.md")); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("its SKILL.md is a symlink: edit the file it points to yourself")
+	}
+	return nil
+}
+
+// within reports whether p is root or below it (both clean, real paths).
+func within(p, root string) bool {
+	return p == root || strings.HasPrefix(p, strings.TrimSuffix(root, string(filepath.Separator))+string(filepath.Separator))
+}
+
+func expandHome(p string) string {
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, strings.TrimPrefix(p[1:], "/"))
+		}
+	}
+	return p
+}
+
+// CheckSkillMD parses content as the SKILL.md of a folder named folder in a temp folder and fails
 // on any spec problem (missing frontmatter, a name other than folder, a missing description …).
-func checkSkillMD(folder, content string) error {
+func CheckSkillMD(folder, content string) error {
 	tmp, err := os.MkdirTemp("", "skilltri-skill-*")
 	if err != nil {
 		return err

@@ -115,3 +115,36 @@ func TestSkillWrite(t *testing.T) {
 		t.Errorf("unknown skill: %v", err)
 	}
 }
+
+func TestCheckWritable(t *testing.T) {
+	root, outside, checkouts := t.TempDir(), t.TempDir(), t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "alpha"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "alpha", "SKILL.md"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(outside, "beta"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "beta"), filepath.Join(root, "beta")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "gamma"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "x.md"), filepath.Join(root, "gamma", "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkWritable(filepath.Join(root, "alpha"), root, []string{checkouts}); err != nil {
+		t.Errorf("alpha: %v", err)
+	}
+	for dir, want := range map[string]string{"beta": "outside the source folder", "gamma": "symlink"} {
+		if err := checkWritable(filepath.Join(root, dir), root, []string{checkouts}); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: %v, want %q", dir, err, want)
+		}
+	}
+	if err := checkWritable(filepath.Join(root, "alpha"), root, []string{filepath.Dir(root)}); err == nil || !strings.Contains(err.Error(), "checkouts") {
+		t.Errorf("in checkouts: %v", err)
+	}
+}
