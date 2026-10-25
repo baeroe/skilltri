@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -88,6 +89,8 @@ Usage:
                             eval "$(skilltri shell-init zsh)"
   skilltri run HARNESS [args...]
                             start a harness with the skills of the working directory
+  skilltri audit [-n N] [--json]
+                            show the last N (default 20) changes agents made through skilltri's tools
   skilltri secret set NAME  store a secret in the keyring
   skilltri secret delete NAME
   skilltri version
@@ -137,6 +140,8 @@ func run(args []string) int {
 		return runAdapter(args[1:])
 	case "import":
 		return runImport(args[1:])
+	case "audit":
+		return runAudit(args[1:])
 	case "secret":
 		return runSecret(args[1:])
 	case "env":
@@ -448,6 +453,32 @@ func runWhich(args []string) int {
 		}
 	}
 	return cli.Which(os.Stdout, dir, jsonOut)
+}
+
+// runAudit implements `skilltri audit [-n N] [--json]`.
+func runAudit(args []string) int {
+	n, jsonOut := 20, false
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		val, isN := "", false
+		switch {
+		case a == "--json":
+			jsonOut = true
+			continue
+		case a == "-n" && i+1 < len(args):
+			i++
+			val, isN = args[i], true
+		case strings.HasPrefix(a, "-n="):
+			val, isN = strings.TrimPrefix(a, "-n="), true
+		}
+		v, err := strconv.Atoi(val)
+		if !isN || err != nil || v < 1 {
+			fmt.Fprint(os.Stderr, "usage: skilltri audit [-n N] [--json]\n")
+			return 2
+		}
+		n = v
+	}
+	return cli.Audit(os.Stdout, n, jsonOut)
 }
 
 // runUpdate implements `skilltri update [source...] [--json]`.

@@ -153,7 +153,7 @@ func TestAgentToolsInDaemonSession(t *testing.T) {
 			reads = append(reads, tl.Def.Name)
 		}
 	}
-	if got := agentTools(t, cs); !slices.Equal(got, want) || len(reads) != 6 {
+	if got := agentTools(t, cs); !slices.Equal(got, want) || len(reads) != 7 {
 		t.Fatalf("tools = %v", got)
 	}
 	status := callText(t, cs, "skilltri_get_status", nil)
@@ -165,6 +165,9 @@ func TestAgentToolsInDaemonSession(t *testing.T) {
 		t.Fatalf("which = %s", which)
 	}
 	for _, name := range reads {
+		if name == "skilltri_read_skill" { // needs a skill id; covered in package agenttools
+			continue
+		}
 		if text := callText(t, cs, name, nil); strings.Contains(text, literal) {
 			t.Fatalf("%s shows the literal env value: %s", name, text)
 		}

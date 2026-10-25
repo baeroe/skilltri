@@ -134,11 +134,11 @@ func (s *Session) loadSkill(_ context.Context, req *mcp.CallToolRequest) (*mcp.C
 	if err != nil {
 		return errorResult(err), nil
 	}
-	body, err := readInside(e.Skill.Dir, "SKILL.md")
+	body, err := ReadSkillFile(e.Skill.Dir, "SKILL.md")
 	if err != nil {
 		return errorResult(err), nil
 	}
-	files, more := skillFiles(e.Skill.Dir)
+	files, more := SkillFiles(e.Skill.Dir)
 	var b strings.Builder
 	b.WriteString(body)
 	if len(files) > 0 {
@@ -162,16 +162,16 @@ func (s *Session) readSkillFile(_ context.Context, req *mcp.CallToolRequest) (*m
 	if err != nil {
 		return errorResult(err), nil
 	}
-	text, err := readInside(e.Skill.Dir, a.Path)
+	text, err := ReadSkillFile(e.Skill.Dir, a.Path)
 	if err != nil {
 		return errorResult(err), nil
 	}
 	return textResult(text), nil
 }
 
-// readInside reads the regular file rel below dir. rel must be relative and stay inside dir, also
+// ReadSkillFile reads the regular file rel below dir. rel must be relative and stay inside dir, also
 // after resolving symlinks (Review Focus 5); files over maxSkillFile are refused.
-func readInside(dir, rel string) (string, error) {
+func ReadSkillFile(dir, rel string) (string, error) {
 	clean := filepath.Clean(rel)
 	if rel == "" || !filepath.IsLocal(clean) { // "..notes.md" is fine, "../x" is not
 		return "", fmt.Errorf("path %q must be relative to the skill folder", rel)
@@ -212,9 +212,9 @@ func readInside(dir, rel string) (string, error) {
 	return string(b), nil
 }
 
-// skillFiles lists the files below dir except SKILL.md, relative and sorted, skipping folders
+// SkillFiles lists the files below dir except SKILL.md, relative and sorted, skipping folders
 // whose name starts with "." (such as .git). It returns at most maxSkillFiles and the number left out.
-func skillFiles(dir string) (files []string, more int) {
+func SkillFiles(dir string) (files []string, more int) {
 	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || p == dir {
 			return nil

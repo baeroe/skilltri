@@ -712,3 +712,57 @@ func TestAgentAddServer(t *testing.T) {
 		t.Fatalf("audit log = %s, %v", data, err)
 	}
 }
+
+// TestAgentNewSkillAndAudit: a skill created by an agent becomes readable through the daemon's
+// catalog, and `skilltri audit` shows the call.
+func TestAgentNewSkillAndAudit(t *testing.T) {
+	sb := newSandbox(t)
+	sb.writeConfig(t, &config.Config{Version: 1, Servers: map[string]*config.Server{}})
+	cs := sb.connect(t, t.TempDir(), &mcp.ClientOptions{Capabilities: &mcp.ClientCapabilities{}})
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "skilltri_new_skill", Arguments: map[string]any{
+		"name": "demo-notes", "description": "Take demo notes.", "body": "# Demo notes\n"}})
+	if err != nil || res.IsError {
+		t.Fatalf("new_skill: %v %+v", err, res)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "skilltri_read_skill", Arguments: map[string]any{"id": "demo-notes"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if text := res.Content[0].(*mcp.TextContent).Text; !res.IsError {
+			if !strings.Contains(text, "description: Take demo notes.") {
+				t.Fatalf("read_skill = %q", text)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the new skill never reached the catalog: %+v", res)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	audit := func(args ...string) (string, int) {
+		c := exec.Command(skilltriBin, append([]string{"audit"}, args...)...)
+		c.Env = sb.env
+		out, err := c.Output()
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			return string(out), exit.ExitCode()
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(out), 0
+	}
+	if out, code := audit("-n", "1"); code != 0 || !strings.Contains(out, "skilltri_new_skill") || !strings.Contains(out, "skill/demo-notes") || !strings.HasSuffix(strings.TrimSpace(out), "ok") {
+		t.Errorf("audit -n 1 = %d %q", code, out)
+	}
+	if out, code := audit("--json"); code != 0 || !strings.Contains(out, `"tool": "skilltri_new_skill"`) {
+		t.Errorf("audit --json = %d %q", code, out)
+	}
+	for _, bad := range [][]string{{"-n", "x"}, {"-n", "0"}, {"-n"}, {"extra"}} {
+		if _, code := audit(bad...); code != 2 {
+			t.Errorf("audit %v: exit %d, want 2", bad, code)
+		}
+	}
+}

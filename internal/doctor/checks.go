@@ -386,3 +386,12 @@ func checkAdapters(_ context.Context, s *state) []Finding {
 	}
 	return out
 }
+
+// checkAgentAccess notes that agents may change skilltri (settings.agentAccess "write", the default).
+func checkAgentAccess(_ context.Context, s *state) []Finding {
+	if s.cfgErr != nil || s.cfg.AgentAccess() != config.AgentAccessWrite {
+		return nil
+	}
+	return []Finding{{Severity: Info, Check: "agent-access", Subject: "settings.agentAccess",
+		Message: "agents can change skilltri; see skilltri audit"}}
+}

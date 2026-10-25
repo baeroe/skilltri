@@ -54,6 +54,7 @@ type state struct {
 var checks = []func(context.Context, *state) []Finding{
 	checkConfig, checkDaemon, checkSources, checkSkills, checkLock, checkViews, checkProjectDirs,
 	checkDuplicates, checkPluginServers, checkHarness, checkHarnessDuplicates, checkShellHook, checkAdapters,
+	checkAgentAccess,
 }
 
 // Run runs every check and returns the findings sorted: errors, warnings, infos; then by Check,

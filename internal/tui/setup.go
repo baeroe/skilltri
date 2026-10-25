@@ -49,6 +49,7 @@ const (
 	setupServiceWork = "setup:service"
 	setupCopyWork    = "setup:copy"
 	setupAdapterWork = "setup:adapter:" // + adapter id
+	setupAgentWork   = "setup:agent"
 )
 
 // setupScanMsg is what the Setup tab reads from the files (in a command): harness registrations,
@@ -74,6 +75,7 @@ const (
 	suShell
 	suService
 	suAdapter
+	suAgent
 	suImport
 )
 
@@ -168,7 +170,8 @@ func newSetupTab(bin string) *setupTab {
 	for _, a := range adapters.Registry {
 		rows = append(rows, suRow{kind: suAdapter, adapter: a})
 	}
-	rows = append(rows, suRow{kind: suBlank}, suRow{kind: suHeader, text: "Import"},
+	rows = append(rows, suRow{kind: suBlank}, suRow{kind: suHeader, text: "Agent access"}, suRow{kind: suAgent},
+		suRow{kind: suBlank}, suRow{kind: suHeader, text: "Import"},
 		suRow{kind: suImport, imp: importOneMCP}, suRow{kind: suImport, imp: importClaude})
 	return &setupTab{rows: rows, idx: 1}
 }
@@ -185,6 +188,8 @@ func (t *setupTab) hints() []string {
 		return []string{"i", "install", "x", "uninstall", "s", "stop daemon", "R", "reload"}
 	case suAdapter:
 		return []string{"space", "on/off", "R", "reload"}
+	case suAgent:
+		return []string{"space", "off/read/write", "R", "reload"}
 	case suImport:
 		return []string{"enter", "preview import", "R", "reload"}
 	}
@@ -280,8 +285,11 @@ func (t *setupTab) key(m *Model, key string) tea.Cmd {
 			return t.stopDaemon(m)
 		}
 	case " ":
-		if r.kind == suAdapter {
+		switch r.kind {
+		case suAdapter:
 			return t.toggleAdapter(m, r.adapter)
+		case suAgent:
+			return t.cycleAgentAccess(m)
 		}
 	case "enter":
 		if r.kind == suImport {
@@ -377,6 +385,47 @@ func (t *setupTab) toggleAdapter(m *Model, a adapters.Adapter) tea.Cmd {
 		}
 		return done + a.Display + " adapter", nil
 	})
+}
+
+// nextAgentAccess is the level after cur: off → read → write → off.
+func nextAgentAccess(cur string) string {
+	switch cur {
+	case config.AgentAccessOff:
+		return config.AgentAccessRead
+	case config.AgentAccessRead:
+		return config.AgentAccessWrite
+	}
+	return config.AgentAccessOff
+}
+
+// cycleAgentAccess sets settings.agentAccess to the next level; running sessions pick it up via
+// the daemon's config watch.
+func (t *setupTab) cycleAgentAccess(m *Model) tea.Cmd {
+	if !needConfig(m) {
+		return nil
+	}
+	next, env := nextAgentAccess(m.snap.Config.AgentAccess()), m.opts.Env
+	return m.act(setupAgentWork, "setting agent access to "+next+" …", true, func() (string, error) {
+		if err := actions.SetAgentAccess(env, next); err != nil {
+			return "", err
+		}
+		return "agent access is now " + next, nil
+	})
+}
+
+// agentAccessAbout explains each agent access level.
+var agentAccessAbout = map[string]string{
+	config.AgentAccessOff:   "off: agents get none of skilltri's own management tools (skilltri_*); loading skills still works.",
+	config.AgentAccessRead:  "read: agents can inspect skilltri (status, servers, skills, sources, which, doctor) but change nothing.",
+	config.AgentAccessWrite: "write: agents can also change skilltri: add, edit and remove servers, sources, rules and local skills, enable and disable things, update sources and restart servers.",
+}
+
+// agentAccessLevel is the effective settings.agentAccess ("" before the config is loaded).
+func agentAccessLevel(m *Model) string {
+	if m.snap.Config == nil {
+		return ""
+	}
+	return m.snap.Config.AgentAccess()
 }
 
 // --- view ----------------------------------------------------------------------------------
@@ -486,6 +535,21 @@ func (t *setupTab) rowLine(m *Model, r suRow, iw int) string {
 			method += " (+ parent folders)"
 		}
 		extra = dimStyle.Render(det + " · " + method)
+	case suAgent:
+		lvl := agentAccessLevel(m)
+		icon, label = dimStyle.Render("-"), "agent tools"
+		switch lvl {
+		case config.AgentAccessOff:
+			icon = dimStyle.Render("○")
+		case config.AgentAccessRead:
+			icon = goodStyle.Render("●")
+		case config.AgentAccessWrite:
+			icon = warnStyle.Render("●")
+		}
+		if lvl == "" {
+			lvl = "-"
+		}
+		extra = dimStyle.Render(lvl)
 	case suImport:
 		icon, label = accentStyle.Render("▸"), importTitles[r.imp]
 		extra = dimStyle.Render(tildify(importFrom(m, r.imp), m.opts.Home))
@@ -614,6 +678,24 @@ func (t *setupTab) detailLines(m *Model, iw int) []string {
 			out = append(out, "")
 			para("note", projectDirCaveat, dimStyle.Render)
 		}
+	case suAgent:
+		lvl := agentAccessLevel(m)
+		if lvl == "" {
+			add("access", dimStyle.Render("no config loaded"))
+		} else {
+			add("access", val(lvl))
+		}
+		add("setting", val("settings.agentAccess"))
+		out = append(out, "")
+		for _, l := range []string{config.AgentAccessOff, config.AgentAccessRead, config.AgentAccessWrite} {
+			style := dimStyle.Render
+			if l == lvl {
+				style = plain
+			}
+			para("", agentAccessAbout[l], style)
+		}
+		out = append(out, "")
+		para("", "space switches off → read → write; running sessions get the new tool list within seconds. Every change an agent makes is logged: run `"+m.cmdName+" audit` to see them.", dimStyle.Render)
 	case suImport:
 		add("from", path(importFrom(m, r.imp)))
 		out = append(out, "")

@@ -120,8 +120,19 @@ Bubble Tea v1 + bubbles + lipgloss, built like tussh's TUI (two panes, single co
 - **Skills:** tree source → plugin → skill with update status, last fetch, warnings; add source (local / git / marketplace), new local skill, open in `$EDITOR`, update now.
 - **Rules editor** (dialog from both tabs): list of rules, add rule with path autocomplete and mode.
 - **Preview:** pick a folder (defaults to the TUI's working directory) and see the effective servers, tools and skills with the deciding rule.
-- **Setup:** harness registration snippets (reuse tussh's `internal/harness`), shell hook line, daemon install, detected duplicates in harness configs.
+- **Setup:** harness registration snippets (reuse tussh's `internal/harness`), shell hook line, daemon install, detected duplicates in harness configs, the agent access level (off / read / write).
 - **Doctor:** results of `skilltri doctor`.
+
+## Agent tools
+
+Every session also gets skilltri's own management tools (`skilltri_<verb>_<noun>`), so agents can inspect and change skilltri directly instead of the user switching to the TUI:
+
+- **Read tools:** `get_status`, `which`, `list_servers`, `list_skills`, `list_sources`, `read_skill` (any catalog skill, active or not), `run_doctor`.
+- **Write tools:** servers (`add_server`, `update_server`, `remove_server`, `restart_server`, `enable_plugin_server`, `accept_plugin_server`), switches and rules (`set_enabled`, `add_rule`, `remove_rule`, `set_rules`), adapters (`set_adapter`), sources (`add_source`, `remove_source`, `update_sources`) and skills (`new_skill` in the config folder's `skills/`, `write_skill` for skills of local sources only: git and marketplace checkouts belong to their upstream).
+- **Access setting** `settings.agentAccess`: `off` (no `skilltri_*` management tools), `read` (read tools only), `write` (all; the default when empty). It is switched in the Setup tab or the config, takes effect in running sessions through `tools/list_changed`, and is not writable by agents. The skill fallback tools do not depend on it.
+- **Secrets:** tool output masks env and header values (`${secret:…}` references stay, literals become `•••`), as well as URL credentials and secret-looking arguments; no tool reads or writes the keyring. Agents may set values, stored as given (a reference or a literal).
+- **Audit:** every write tool call is appended to `StateDir/audit.jsonl` (time, tool, target, summary, client, folder, ok, error; never env or header values). `skilltri audit [-n N] [--json]` shows it; `skilltri doctor` adds an info finding while the level is `write`.
+- All edits go through the same `actions` functions and locked `config.Update` as the TUI and the CLI, so concurrent calls from several sessions and the TUI lose no update, and a failing call leaves the config unchanged.
 
 ## CLI
 
@@ -135,6 +146,7 @@ skilltri update [source]      fetch sources now
 skilltri status [--json]      daemon, servers, sources
 skilltri which [dir] [--json] effective servers/tools/skills for a folder and why
 skilltri doctor [--json]      broken skills, invalid frontmatter, duplicates, stale views, review-pending servers
+skilltri audit [-n N] [--json] the changes agents made through skilltri's tools
 skilltri shell-init SHELL     print the shell hook
 skilltri env [dir]            print the adapter variables for a folder (used by the hook)
 skilltri run HARNESS [args]   start a harness with the folder's view
@@ -177,6 +189,7 @@ skilltri version
 - **Plugin MCP servers are opt-in and re-reviewed on change.**
 - **Excludes win; nearest level with rules decides; no rules = everywhere.**
 - **Secrets in the keyring, config in `~/.config`, ANSI palette colors only** (as in tussh).
+- **Agents may change skilltri directly** through its own MCP tools (user decision 2026-10-25). The default access level is `write`; `settings.agentAccess` (`off`, `read`, `write`) limits it, and every change is recorded in the audit log.
 
 ## Out of scope for now
 

@@ -44,6 +44,10 @@ type demoBackend struct {
 	restartErr error
 	restarts   []string
 
+	updateStates []catalog.SourceState // what Update returns
+	updateErr    error
+	updates      [][]string // the names of every Update call
+
 	mu        sync.Mutex
 	whichDirs []string
 	doctorDir string
@@ -102,8 +106,11 @@ func (b *demoBackend) Doctor(_ context.Context, dir string) []doctor.Finding {
 	b.mu.Unlock()
 	return []doctor.Finding{{Severity: doctor.Warning, Check: "demo", Subject: "demo", Message: "demo finding"}}
 }
-func (b *demoBackend) Update(context.Context, []string) ([]catalog.SourceState, error) {
-	return nil, nil
+func (b *demoBackend) Update(_ context.Context, names []string) ([]catalog.SourceState, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.updates = append(b.updates, slices.Clone(names))
+	return b.updateStates, b.updateErr
 }
 func (b *demoBackend) Env() actions.Env { return b.env }
 func (b *demoBackend) AuditLog() string { return b.auditPath }
@@ -143,7 +150,7 @@ func call(t *testing.T, b Backend, c Call, name string, args any) (string, bool)
 	return tc.Text, res.IsError
 }
 
-var readTools = []string{"skilltri_get_status", "skilltri_list_servers", "skilltri_list_skills", "skilltri_list_sources", "skilltri_run_doctor", "skilltri_which"}
+var readTools = []string{"skilltri_get_status", "skilltri_list_servers", "skilltri_list_skills", "skilltri_list_sources", "skilltri_read_skill", "skilltri_run_doctor", "skilltri_which"}
 
 func names(ts []Tool) []string {
 	var out []string
@@ -206,6 +213,9 @@ func TestReadToolsReturnJSON(t *testing.T) {
 	b := newDemoBackend()
 	c := Call{Client: "demo-client", Dir: t.TempDir()}
 	for _, name := range readTools {
+		if name == "skilltri_read_skill" { // returns the SKILL.md text, like skilltri_load_skill
+			continue
+		}
 		t.Run(name, func(t *testing.T) {
 			text, isErr := call(t, b, c, name, map[string]any{})
 			if isErr {

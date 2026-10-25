@@ -560,3 +560,31 @@ func TestSetupHarnessDuplicates(t *testing.T) {
 		t.Errorf("claude adapter has the project-dir caveat:\n%s", v)
 	}
 }
+
+func TestSetupAgentAccess(t *testing.T) {
+	h := newHarness(t, TabSetup)
+	h.writeConfig(demoConfig(1))
+	h.size(160, 60)
+	h.load()
+	h.selectSetup(rowKind(suAgent))
+	if l := lineWith(h, "agent tools"); !strings.Contains(l, "write") {
+		t.Errorf("default row: %q", l)
+	}
+	for _, want := range []string{"settings.agentAccess", "write: agents can also change skilltri", "audit` to see them"} {
+		if !strings.Contains(screen(h), want) {
+			t.Errorf("details lack %q:\n%s", want, screen(h))
+		}
+	}
+	if !strings.Contains(ansi.Strip(h.m.footer(160)), "off/read/write") {
+		t.Errorf("hints: %q", ansi.Strip(h.m.footer(160)))
+	}
+	for _, want := range []string{config.AgentAccessOff, config.AgentAccessRead, config.AgentAccessWrite, config.AgentAccessOff} {
+		h.key(" ")
+		if got := h.config().Settings.AgentAccess; got != want {
+			t.Fatalf("agentAccess = %q, want %q", got, want)
+		}
+		if l := lineWith(h, "agent tools"); !strings.Contains(l, want) || !strings.Contains(screen(h), "agent access is now "+want) {
+			t.Errorf("row after %s: %q\n%s", want, l, screen(h))
+		}
+	}
+}
