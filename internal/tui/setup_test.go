@@ -570,7 +570,7 @@ func TestSetupAgentAccess(t *testing.T) {
 	if l := lineWith(h, "agent tools"); !strings.Contains(l, "write") {
 		t.Errorf("default row: %q", l)
 	}
-	for _, want := range []string{"settings.agentAccess", "write: agents can also change skilltri", "audit` to see them"} {
+	for _, want := range []string{"settings.agentAccess", "write: agents can also change skilltri", "audit` to see them", "outside the agent's sandbox"} {
 		if !strings.Contains(screen(h), want) {
 			t.Errorf("details lack %q:\n%s", want, screen(h))
 		}

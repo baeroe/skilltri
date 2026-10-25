@@ -119,7 +119,26 @@ type Tool struct {
 // registry is every tool, sorted by name (read.go and the write tools add to it).
 var registry []Tool
 
+// destructiveTools may remove or overwrite what is there (a server, source, rule list, SKILL.md,
+// an enabled node); openWorldTools reach out to the network (git fetches).
+var (
+	destructiveTools = []string{"skilltri_remove_rule", "skilltri_remove_server", "skilltri_remove_source", "skilltri_set_enabled",
+		"skilltri_set_rules", "skilltri_update_server", "skilltri_write_skill"}
+	openWorldTools = []string{"skilltri_add_source", "skilltri_update_sources"}
+)
+
+// register adds ts to the registry and gives each its MCP annotations: read tools are read-only,
+// write tools are destructive when listed in destructiveTools; openWorldTools are open-world.
 func register(ts ...Tool) {
+	for _, t := range ts {
+		openWorld := slices.Contains(openWorldTools, t.Def.Name)
+		a := &mcp.ToolAnnotations{ReadOnlyHint: !t.Write, OpenWorldHint: &openWorld}
+		if t.Write {
+			d := slices.Contains(destructiveTools, t.Def.Name)
+			a.DestructiveHint = &d
+		}
+		t.Def.Annotations = a
+	}
 	registry = append(registry, ts...)
 	slices.SortFunc(registry, func(a, b Tool) int { return strings.Compare(a.Def.Name, b.Def.Name) })
 }

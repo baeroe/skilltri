@@ -494,3 +494,30 @@ func TestSourceErrorsMasked(t *testing.T) {
 		}
 	}
 }
+
+func TestToolAnnotations(t *testing.T) {
+	destructive := []string{"skilltri_remove_rule", "skilltri_remove_server", "skilltri_remove_source", "skilltri_set_enabled",
+		"skilltri_set_rules", "skilltri_update_server", "skilltri_write_skill"}
+	openWorld := []string{"skilltri_add_source", "skilltri_update_sources"}
+	for _, tl := range Tools(config.AgentAccessWrite) {
+		a, n := tl.Def.Annotations, tl.Def.Name
+		if a == nil {
+			t.Errorf("%s has no annotations", n)
+			continue
+		}
+		if a.ReadOnlyHint == tl.Write {
+			t.Errorf("%s: readOnlyHint %v", n, a.ReadOnlyHint)
+		}
+		if a.OpenWorldHint == nil || *a.OpenWorldHint != slices.Contains(openWorld, n) {
+			t.Errorf("%s: openWorldHint %v", n, a.OpenWorldHint)
+		}
+		if tl.Write && (a.DestructiveHint == nil || *a.DestructiveHint != slices.Contains(destructive, n)) {
+			t.Errorf("%s: destructiveHint %v", n, a.DestructiveHint)
+		}
+	}
+	for _, n := range []string{"skilltri_add_server", "skilltri_update_server"} {
+		if d := lookup(n).Def.Description; !strings.Contains(d, "the command runs as the user, outside this harness's sandbox, in the skilltri daemon; only add servers the user asked for") {
+			t.Errorf("%s description: %s", n, d)
+		}
+	}
+}

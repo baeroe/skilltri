@@ -18,12 +18,12 @@ func init() {
 	register(
 		writeTool(&mcp.Tool{
 			Name:        "skilltri_add_server",
-			Description: "Add an MCP server to skilltri: a stdio server (command, args, env, cwd) or an http server (url, headers). Env and header values are stored as given: pass a ${secret:NAME} reference for secrets kept in the keyring, or a literal. The name \"skilltri\" is reserved.",
+			Description: "Add an MCP server to skilltri: a stdio server (command, args, env, cwd) or an http server (url, headers). Env and header values are stored as given: pass a ${secret:NAME} reference for secrets kept in the keyring, or a literal. The name \"skilltri\" is reserved."+sandboxNote,
 			InputSchema: required(object(serverProps(false)), "name", "type"),
 		}, addServer),
 		writeTool(&mcp.Tool{
 			Name:        "skilltri_update_server",
-			Description: "Change an MCP server: only the fields given change, everything else (rules, tool settings, plugin origin, disabled flag) stays. A given env or headers map replaces the whole map and given args the whole list. Values sent back as skilltri_list_servers shows them (masked with •••) keep the hidden stored value: an env or header value of the same key, an argument at the same position (else the stored argument with that masked form) and the url; any other value containing ••• is refused. newName renames the server.",
+			Description: "Change an MCP server: only the fields given change, everything else (rules, tool settings, plugin origin, disabled flag) stays. A given env or headers map replaces the whole map and given args the whole list. Values sent back as skilltri_list_servers shows them (masked with •••) keep the hidden stored value: an env or header value of the same key, an argument at the same position (else the stored argument with that masked form) and the url; any other value containing ••• is refused. newName renames the server."+sandboxNote,
 			InputSchema: required(object(serverProps(true)), "name"),
 		}, updateServer),
 		writeTool(&mcp.Tool{
@@ -53,6 +53,9 @@ func init() {
 		}, acceptPluginServer),
 	)
 }
+
+// sandboxNote warns agents that a stdio server's command is not confined by their harness.
+const sandboxNote = " For a stdio server, the command runs as the user, outside this harness's sandbox, in the skilltri daemon; only add servers the user asked for."
 
 // restartNote ends the restart tool's description (it changes no config).
 const restartNote = " The config is not changed; the call is recorded in skilltri's audit log."

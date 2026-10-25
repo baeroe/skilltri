@@ -233,6 +233,8 @@ Besides the tools of your servers, every session gets skilltri's own management 
 
 The skill fallback tools (`skilltri_load_skill`, `skilltri_read_skill_file`) do not depend on this setting. No tool can change `agentAccess` itself, and no tool reads or writes the keyring: agents see `${secret:NAME}` references and `•••` for literal env and header values, and they set values as references or literals.
 
+**Security:** `write` lets an agent add a stdio server, and its command runs as you in the skilltri daemon, outside the harness's sandbox and permission prompts. Treat an agent with write access like a shell: keep `write` for agents you trust (or switch to `read`), and check `skilltri audit` for what they changed.
+
 Every call of a changing tool is appended to `audit.jsonl` in the state folder (time, tool, target, a summary without env or header values, client, folder, result). `skilltri audit [-n N] [--json]` shows the last N entries (default 20); `skilltri doctor` reminds you while agents have write access.
 
 ## CLI reference

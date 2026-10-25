@@ -417,7 +417,7 @@ func (t *setupTab) cycleAgentAccess(m *Model) tea.Cmd {
 var agentAccessAbout = map[string]string{
 	config.AgentAccessOff:   "off: agents get none of skilltri's own management tools (skilltri_*); loading skills still works.",
 	config.AgentAccessRead:  "read: agents can inspect skilltri (status, servers, skills, sources, which, doctor) but change nothing.",
-	config.AgentAccessWrite: "write: agents can also change skilltri: add, edit and remove servers, sources, rules and local skills, enable and disable things, update sources and restart servers.",
+	config.AgentAccessWrite: "write: agents can also change skilltri: add, edit and remove servers, sources, rules and local skills, enable and disable things, update sources and restart servers. A server an agent adds runs its command as you, outside the agent's sandbox: keep write for agents you trust.",
 }
 
 // agentAccessLevel is the effective settings.agentAccess ("" before the config is loaded).
