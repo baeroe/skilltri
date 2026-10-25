@@ -100,72 +100,148 @@ skilltri update                    # fetch all git and marketplace sources now
 - **Plugin MCP servers** (a plugin's `.mcp.json`) are listed as *available, off*. Switching one on (`skilltri plugin-server enable SOURCE/PLUGIN/SERVER`, or **E** in the Skills tab) makes it a normal gateway server with a copy of the plugin's effective rules. If an update later changes its definition (command, args, URL, env), the server keeps running the old definition and is marked **needs review** until you accept the change (`skilltri plugin-server accept NAME`, or **A** in the Servers tab). A server that runs code from the plugin folder is also marked when the plugin's checkout moves to another commit.
 - Hooks, subagents, LSP servers, `bin/` and settings of plugins are not taken over.
 
-## Install
+## Setup guide
+
+This walks you from nothing to a working setup. Each step ends with a check, so you know it worked before you move on. Nothing in steps 1–3 touches your harnesses, so you can try skilltri next to your current setup first.
+
+### Requirements
+
+- macOS or Linux
+- `git` on `PATH` (for git and marketplace sources)
+- One or more agent harnesses: Claude Code, Codex CLI, Gemini CLI, opencode, Cursor, GitHub Copilot CLI or Amp
+
+### 1. Install
 
 ```sh
 brew install baeroe/tap/skilltri
 ```
 
-Or with Go (1.26+):
+Or with Go (1.26+): `go install github.com/baeroe/skilltri@latest`. From a checkout: `make install` (builds to `~/.local/bin/skilltri`).
+
+**Check:** `skilltri version` prints the version.
+
+### 2. Add your MCP servers
+
+Coming from **1MCP**, import its config:
 
 ```sh
-go install github.com/baeroe/skilltri@latest
+skilltri import 1mcp                  # reads ~/.config/1mcp/mcp.json, or: skilltri import 1mcp path/to/mcp.json
 ```
 
-From source:
+Header values always go to the keyring. Env values go there only when the key looks like a credential (contains `token`, `key`, `secret`, `password` or `auth`); other env values stay in `config.json`. 1MCP tags are not imported (use folder rules instead), and `sse` servers are skipped.
+
+Otherwise add servers in the TUI: run `skilltri`, press **a** in the Servers tab, fill in the form. A secret can go straight into the keyring: put the cursor on an env or header line and press **ctrl+k**.
+
+**Check:** `skilltri` shows your servers in the Servers tab. They start the first time a session needs them.
+
+### 3. Add your skills
+
+Coming from **Claude Code** marketplaces and user skills:
 
 ```sh
-make install          # builds to ~/.local/bin/skilltri
+skilltri import claude                # marketplaces (only the plugins you had enabled stay on) + copies of ~/.claude/skills
+skilltri update                       # fetches the git repositories
 ```
 
-Skilltri needs `git` on `PATH` for git and marketplace sources.
+The import prints what to clean up in Claude Code later; it does not change anything there.
 
-## Quick start
+Other sources:
 
-1. **Import what you have** (optional). From 1MCP: servers and timeouts. Header values always go to the keyring, env values only when the key looks like a credential (contains `token`, `key`, `secret`, `password` or `auth`); other env values stay in `config.json`. 1MCP tags are not imported (set folder rules instead), and `sse` servers are skipped. From Claude Code: installed marketplaces (only the enabled plugins stay on) and user skills; it prints what to clean up in Claude Code afterwards.
+```sh
+skilltri source add git team-skills owner/repo           # a git repository with SKILL.md folders
+skilltri source add marketplace market owner/marketplace  # a Claude plugin marketplace
+skilltri source add local mine ~/my-skills                # a folder on disk
+skilltri skill new commit-message                         # a new local skill; edit the SKILL.md it prints
+skilltri update
+```
 
-   ```sh
-   skilltri import 1mcp       # reads ~/.config/1mcp/mcp.json, or: skilltri import 1mcp path/to/mcp.json
-   skilltri import claude
-   ```
+**Check:** the Skills tab lists the sources with their skills; a source with a problem shows its error there.
 
-   You can also add servers in the TUI (**a** in the Servers tab) and skill sources with `skilltri source add` or **a** in the Skills tab.
+### 4. Set folder rules
 
-2. **Register the gateway** in your harness, once. For Claude Code:
+Decide where each server and skill is active. In the TUI select a server, source, plugin or skill and press **r**; or on the command line:
 
-   ```sh
-   claude mcp add --scope user skilltri -- skilltri mcp
-   ```
+```sh
+skilltri rule add server/tickets tree ~/dev/acme-shop          # only in this project and below
+skilltri rule add source/team-skills not-tree ~/dev/private    # everywhere except here
+```
 
-   The **Setup** tab shows the snippets for Codex CLI, Gemini CLI, opencode and Cursor with the absolute path of your binary, and copies them with **c**. Then remove the 1MCP entry from the harness's config (Doctor reports "1MCP still registered") and any server that skilltri now serves, or it runs twice (Doctor reports such duplicates too).
+**Check:** `skilltri which ~/dev/acme-shop` (or the Preview tab) shows what is active in that folder and which rule decided it.
 
-3. **Add the shell hook** to your rc file, so harnesses started from a shell get the folder's skills:
+### 5. Start the daemon as a service
 
-   ```sh
-   eval "$(skilltri shell-init zsh)"     # ~/.zshrc
-   eval "$(skilltri shell-init bash)"    # ~/.bashrc
-   skilltri shell-init fish | source     # ~/.config/fish/config.fish
-   ```
+```sh
+skilltri daemon install               # launchd agent on macOS, systemd user unit on Linux
+```
 
-   The hook runs on every `cd`, and again at the next prompt when the config or the skill catalog changed or the view folder is gone, so you never need to `cd` again after a change.
+Without this, the first `skilltri mcp` starts the daemon on demand; the service keeps it running across logins.
 
-   Claude Code gets its skills this way by default. Codex, Gemini CLI, OpenCode, Cursor, Copilot CLI and Amp need their adapter enabled (`skilltri adapter enable codex`, or **space** on the adapter in the Setup tab); otherwise they get skills only through the MCP fallback.
+**Check:** `skilltri status` shows `daemon: running`.
 
-   Without the hook, start a harness through skilltri instead: `skilltri run claude-code` (or `codex`, `gemini-cli`, `opencode`, `cursor`, `github-copilot`, `amp`; extra arguments are passed on).
+### 6. Register skilltri in your harnesses
 
-4. **Install the daemon** as a login service (a launchd agent on macOS, a systemd user unit on Linux):
+Register `skilltri mcp` once per harness. This is the only MCP server the harness needs.
 
-   ```sh
-   skilltri daemon install
-   ```
+| Harness | Register |
+|---|---|
+| Claude Code | `claude mcp add --scope user skilltri -- skilltri mcp` |
+| Codex CLI | `codex mcp add skilltri -- skilltri mcp` |
+| Gemini CLI | `gemini mcp add -s user skilltri skilltri mcp` |
+| opencode | in `~/.config/opencode/opencode.json`: `"mcp": {"skilltri": {"type": "local", "command": ["skilltri", "mcp"], "enabled": true}}` |
+| Cursor | in `~/.cursor/mcp.json`: `"mcpServers": {"skilltri": {"type": "stdio", "command": "skilltri", "args": ["mcp"]}}` |
 
-5. **Check the setup:**
+The Setup tab shows these snippets with the absolute path of your binary and copies them with **c**. If a harness does not find `skilltri` on its `PATH`, use the absolute path (`which skilltri`).
 
-   ```sh
-   skilltri doctor
-   ```
+Then **remove the old entries** from each harness's config: the 1MCP entry (Doctor reports "1MCP still registered") and every server that skilltri now serves, or it runs twice (Doctor and the Setup tab report such duplicates).
 
-Then open `skilltri`, set rules on your servers and sources, and check the result for a folder in the Preview tab or with `skilltri which DIR`.
+**Check:** start the harness in a project folder and list its MCP tools (`/mcp` in Claude Code). You see `<server>_<tool>` names for the servers active in that folder, plus skilltri's own `skilltri_*` tools.
+
+### 7. Deliver skills natively
+
+Add the shell hook to your rc file, so harnesses started from a shell get the folder's skills as native skills:
+
+```sh
+eval "$(skilltri shell-init zsh)"     # ~/.zshrc
+eval "$(skilltri shell-init bash)"    # ~/.bashrc
+skilltri shell-init fish | source     # ~/.config/fish/config.fish
+```
+
+Open a new shell afterwards. The hook runs on every `cd`, and again at the next prompt when the config or the skill catalog changed.
+
+- **Claude Code** gets the skills as plugins (`<plugin>:<skill>`, local and git skills under `skilltri:`). Nothing else to do.
+- **Codex CLI, Gemini CLI, opencode, Cursor, GitHub Copilot CLI, Amp** read `.agents/skills`. Enable their adapter: `skilltri adapter enable codex` (or **space** on the adapter in the Setup tab). skilltri then links the active skills into `.agents/skills` of git repositories you `cd` into and keeps them out of git.
+- Without the hook, start the harness through skilltri: `skilltri run claude-code` (or `codex`, `gemini-cli`, `opencode`, `cursor`, `github-copilot`, `amp`).
+- Harnesses without either still get the skills through the MCP fallback (`skilltri_load_skill`).
+
+After moving your Claude Code plugins to skilltri, uninstall them in Claude Code (`claude plugin uninstall <plugin>@<marketplace>`, as printed by the import), or their skills show up twice. Doctor lists the duplicates.
+
+**Check:** in a project folder, `skilltri env` prints `CLAUDE_CODE_PLUGIN_DIRS=…`, and a new Claude Code session there lists the skills you expect.
+
+### 8. Decide what agents may change
+
+skilltri's own tools (see [Agent tools](#agent-tools)) let agents read and change skilltri. The default is `write`. Choose in the Setup tab (**space** on "Agent access") between `off`, `read` and `write`. Every change an agent makes is logged:
+
+```sh
+skilltri audit
+```
+
+### 9. Final check
+
+```sh
+skilltri doctor
+```
+
+It reports problems with the config, the daemon, sources, skills, views, duplicates, harness registrations, the shell hook and adapters, each with a fix.
+
+### Uninstall
+
+```sh
+skilltri daemon uninstall
+brew uninstall skilltri
+rm -rf ~/.config/skilltri ~/.local/state/skilltri ~/.local/share/skilltri ~/.cache/skilltri
+```
+
+Remove the `skilltri` entry from your harnesses and the `shell-init` line from your rc file. Secrets that skilltri stored are in the keyring under the service `skilltri` (delete them with `skilltri secret delete NAME` before uninstalling, or in your keychain app).
 
 ## TUI
 
