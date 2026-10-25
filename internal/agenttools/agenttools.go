@@ -4,13 +4,15 @@
 // the gateway; the daemon side adapts its state to the small types defined here.
 //
 // Agents never see secret values: env and header values are masked (MaskValue), no tool reads or
-// writes the keyring.
+// writes the keyring. Every write tool call is appended to the audit log (package audit) without
+// env or header values.
 package agenttools
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"slices"
@@ -18,6 +20,7 @@ import (
 	"time"
 
 	"github.com/baeroe/skilltri/internal/actions"
+	"github.com/baeroe/skilltri/internal/audit"
 	"github.com/baeroe/skilltri/internal/catalog"
 	"github.com/baeroe/skilltri/internal/config"
 	"github.com/baeroe/skilltri/internal/doctor"
@@ -40,6 +43,10 @@ type Backend interface {
 	Update(ctx context.Context, sources []string) ([]catalog.SourceState, error)
 	// Env is where actions edit the config (write tools set Env.Dir to the call's folder).
 	Env() actions.Env
+	// Restart stops every instance of the configured server name; the next use starts it fresh.
+	Restart(name string) error
+	// AuditLog is the path of the audit log every write tool call is appended to.
+	AuditLog() string
 }
 
 // Status is the daemon's state (the agent view of the status control command).
@@ -205,3 +212,77 @@ func object(props map[string]any) map[string]any {
 }
 
 func str(desc string) map[string]any { return map[string]any{"type": "string", "description": desc} }
+
+// effect ends every write tool's description.
+const effect = " Config changes reach every running session within seconds (the daemon watches the config); the call is recorded in skilltri's audit log."
+
+// applied ends the confirmation of a config change.
+const applied = " Running sessions get the change within seconds."
+
+// change is what a write call did, for its result and its audit entry. A run fills target as
+// soon as it knows it, so a failed call is audited with it too.
+type change struct {
+	target   string   // the node, e.g. "server/docs"
+	summary  string   // what changed, never env or header values
+	message  string   // the confirmation
+	warnings []string // e.g. unknown-target warnings of actions
+	secrets  []string // literal values of the call, kept out of every text
+}
+
+// writeTool is a write tool: run does the change, then the call is audited (success or failure)
+// and answered with the confirmation and warnings, or with the error as an IsError result.
+func writeTool(def *mcp.Tool, run func(ctx context.Context, b Backend, c Call, args json.RawMessage, ch *change) error) Tool {
+	def.Description += effect
+	return Tool{Def: def, Write: true, Handle: func(ctx context.Context, b Backend, c Call, args json.RawMessage) (*mcp.CallToolResult, error) {
+		var ch change
+		err := run(ctx, b, c, args, &ch)
+		scrub := func(s string) string {
+			for _, v := range ch.secrets {
+				s = strings.ReplaceAll(s, v, mask)
+			}
+			return s
+		}
+		e := audit.Entry{Tool: def.Name, Target: ch.target, Summary: scrub(ch.summary), Client: c.Client, Dir: c.Dir, OK: err == nil}
+		if err != nil {
+			e.Error = scrub(err.Error())
+		}
+		aerr := audit.Append(b.AuditLog(), e)
+		if err != nil {
+			return errorResult(errors.New(e.Error)), nil
+		}
+		lines := []string{scrub(ch.message)}
+		for _, w := range ch.warnings {
+			lines = append(lines, "warning: "+scrub(w))
+		}
+		if aerr != nil {
+			lines = append(lines, "warning: the audit log could not be written: "+aerr.Error())
+		}
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: strings.Join(lines, "\n")}}}, nil
+	}}
+}
+
+// callEnv is the backend's actions Env for the call's folder.
+func callEnv(b Backend, c Call) actions.Env {
+	e := b.Env()
+	e.Dir = c.Dir
+	return e
+}
+
+func boolean(desc string) map[string]any {
+	return map[string]any{"type": "boolean", "description": desc}
+}
+func integer(desc string) map[string]any {
+	return map[string]any{"type": "integer", "description": desc}
+}
+func strList(desc string) map[string]any {
+	return map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": desc}
+}
+func strMap(desc string) map[string]any {
+	return map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}, "description": desc}
+}
+
+// required marks props of an object schema as required.
+func required(schema map[string]any, props ...string) map[string]any {
+	schema["required"] = props
+	return schema
+}

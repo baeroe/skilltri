@@ -681,3 +681,34 @@ func TestToolTargetWarning(t *testing.T) {
 		t.Fatalf("known tool: %d %q", code, errOut)
 	}
 }
+
+// An agent adds a server through skilltri_add_server; its tools reach the session via
+// list_changed (the daemon's config watch), and the call is in the audit log.
+func TestAgentAddServer(t *testing.T) {
+	sb := newSandbox(t)
+	sb.writeConfig(t, &config.Config{Version: 1, Servers: map[string]*config.Server{"alpha": fake("alpha", "ping")}})
+	changed := make(chan struct{}, 16)
+	cs := sb.connect(t, t.TempDir(), &mcp.ClientOptions{Capabilities: &mcp.ClientCapabilities{},
+		ToolListChangedHandler: func(context.Context, *mcp.ToolListChangedRequest) { changed <- struct{}{} }})
+	if got := toolNames(t, cs); !slices.Equal(got, []string{"alpha_ping"}) {
+		t.Fatalf("tools = %v", got)
+	}
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "skilltri_add_server", Arguments: map[string]any{
+		"name": "gamma", "type": "stdio", "command": fakeBin, "env": map[string]string{"FAKEMCP_NAME": "gamma", "FAKEMCP_TOOLS": "echo"}}})
+	if err != nil || res.IsError {
+		t.Fatalf("add_server: %v %+v", err, res)
+	}
+	want := []string{"alpha_ping", "gamma_echo"}
+	deadline := time.After(15 * time.Second)
+	for got := toolNames(t, cs); !slices.Equal(got, want); got = toolNames(t, cs) {
+		select {
+		case <-changed:
+		case <-deadline:
+			t.Fatalf("tools after add_server = %v, want %v", got, want)
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(sb.state, "audit.jsonl"))
+	if err != nil || !strings.Contains(string(data), `"tool":"skilltri_add_server","target":"server/gamma"`) || !strings.Contains(string(data), `"ok":true`) {
+		t.Fatalf("audit log = %s, %v", data, err)
+	}
+}

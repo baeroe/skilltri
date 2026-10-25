@@ -29,3 +29,7 @@ func (d *Daemon) Which(dir string) (WhichReply, error) { return d.which(Hello{Ar
 func (d *Daemon) UpdateSources(ctx context.Context, names []string) (UpdateReply, error) {
 	return d.update(ctx, names)
 }
+
+// Restart answers like the "restart" control command: it stops every instance of the configured
+// server name, and the next session (or which) starts a fresh process.
+func (d *Daemon) Restart(name string) error { return d.restart([]string{name}) }

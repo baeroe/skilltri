@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/baeroe/skilltri/internal/agenttools"
+	"github.com/baeroe/skilltri/internal/audit"
 	"github.com/baeroe/skilltri/internal/config"
 	"github.com/baeroe/skilltri/internal/daemon"
 	"github.com/baeroe/skilltri/internal/rules"
@@ -112,12 +114,22 @@ func agentTools(t *testing.T, cs *mcp.ClientSession) []string {
 
 func callText(t *testing.T, cs *mcp.ClientSession, name string, args map[string]any) string {
 	t.Helper()
+	text := callAny(t, cs, name, args)
+	if !json.Valid([]byte(text)) {
+		t.Fatalf("%s: %s", name, text)
+	}
+	return text
+}
+
+// callAny calls a tool that must succeed and returns its text.
+func callAny(t *testing.T, cs *mcp.ClientSession, name string, args map[string]any) string {
+	t.Helper()
 	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: name, Arguments: args})
 	if err != nil {
 		t.Fatalf("%s: %v", name, err)
 	}
 	text := res.Content[0].(*mcp.TextContent).Text
-	if res.IsError || !json.Valid([]byte(text)) {
+	if res.IsError {
 		t.Fatalf("%s: %s", name, text)
 	}
 	return text
@@ -134,8 +146,14 @@ func demoConfig() *config.Config {
 func TestAgentToolsInDaemonSession(t *testing.T) {
 	dir := rules.Normalize(t.TempDir())
 	cs, cfgPath, changed := startDaemon(t, demoConfig(), dir)
-	want := []string{"skilltri_get_status", "skilltri_list_servers", "skilltri_list_skills", "skilltri_list_sources", "skilltri_run_doctor", "skilltri_which"}
-	if got := agentTools(t, cs); !slices.Equal(got, want) {
+	var want, reads []string
+	for _, tl := range agenttools.Tools(config.AgentAccessWrite) {
+		want = append(want, tl.Def.Name)
+		if !tl.Write {
+			reads = append(reads, tl.Def.Name)
+		}
+	}
+	if got := agentTools(t, cs); !slices.Equal(got, want) || len(reads) != 6 {
 		t.Fatalf("tools = %v", got)
 	}
 	status := callText(t, cs, "skilltri_get_status", nil)
@@ -146,7 +164,7 @@ func TestAgentToolsInDaemonSession(t *testing.T) {
 	if !strings.Contains(which, `"dir": "`+dir+`"`) || !strings.Contains(which, `"name": "demo"`) {
 		t.Fatalf("which = %s", which)
 	}
-	for _, name := range want {
+	for _, name := range reads {
 		if text := callText(t, cs, name, nil); strings.Contains(text, literal) {
 			t.Fatalf("%s shows the literal env value: %s", name, text)
 		}
@@ -183,5 +201,35 @@ func TestRunDoctorUsesSessionDir(t *testing.T) {
 	text := callText(t, cs, "skilltri_run_doctor", nil)
 	if !strings.Contains(text, `"fix or delete `+manifest+`"`) {
 		t.Fatalf("doctor misses the project-dir finding for %s: %s", manifest, text)
+	}
+}
+
+// Write tools edit the daemon's config file, restart in process and audit to the state dir.
+func TestWriteToolsInDaemonSession(t *testing.T) {
+	dir := rules.Normalize(t.TempDir())
+	cs, cfgPath, _ := startDaemon(t, demoConfig(), dir)
+	callAny(t, cs, "skilltri_add_server", map[string]any{"name": "docs", "type": "http", "url": "https://mcp.example.test/mcp",
+		"headers": map[string]string{"Authorization": "Bearer " + literal}})
+	c, err := config.Load(cfgPath)
+	if err != nil || c.Servers["docs"] == nil || c.Servers["docs"].Headers["Authorization"] != "Bearer "+literal {
+		t.Fatalf("config = %+v, %v", c, err)
+	}
+	callAny(t, cs, "skilltri_restart_server", map[string]any{"name": "demo"})
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "skilltri_restart_server", Arguments: map[string]any{"name": "nope"}})
+	if err != nil || !res.IsError {
+		t.Fatalf("restart of an unknown server: %v %+v", err, res)
+	}
+	es, err := audit.Read(filepath.Join(os.Getenv("SKILLTRI_STATE_DIR"), "audit.jsonl"), 0)
+	if err != nil || len(es) != 3 {
+		t.Fatalf("audit = %+v, %v", es, err)
+	}
+	if e := es[0]; e.Tool != "skilltri_add_server" || e.Target != "server/docs" || !e.OK || e.Client != "demo-harness" || e.Dir != dir {
+		t.Fatalf("audit entry = %+v", e)
+	}
+	if es[2].OK || es[2].Error == "" {
+		t.Fatalf("failed restart audit = %+v", es[2])
+	}
+	if data, _ := os.ReadFile(filepath.Join(os.Getenv("SKILLTRI_STATE_DIR"), "audit.jsonl")); strings.Contains(string(data), literal) {
+		t.Fatalf("audit log shows the literal: %s", data)
 	}
 }

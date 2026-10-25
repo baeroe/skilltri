@@ -37,6 +37,11 @@ type demoBackend struct {
 
 	status []ServerStatus // nil: the default demo states
 
+	env        actions.Env // where write tools edit the config (writeBackend)
+	auditPath  string
+	restartErr error
+	restarts   []string
+
 	mu        sync.Mutex
 	whichDirs []string
 	doctorDir string
@@ -95,7 +100,17 @@ func (b *demoBackend) Doctor(_ context.Context, dir string) []doctor.Finding {
 func (b *demoBackend) Update(context.Context, []string) ([]catalog.SourceState, error) {
 	return nil, nil
 }
-func (b *demoBackend) Env() actions.Env { return actions.Env{} }
+func (b *demoBackend) Env() actions.Env { return b.env }
+func (b *demoBackend) AuditLog() string { return b.auditPath }
+func (b *demoBackend) Restart(name string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.restartErr != nil {
+		return b.restartErr
+	}
+	b.restarts = append(b.restarts, name)
+	return nil
+}
 
 func call(t *testing.T, b Backend, c Call, name string, args any) (string, bool) {
 	t.Helper()

@@ -16,6 +16,7 @@ import (
 	"github.com/baeroe/skilltri/internal/daemon"
 	"github.com/baeroe/skilltri/internal/doctor"
 	"github.com/baeroe/skilltri/internal/gateway"
+	"github.com/baeroe/skilltri/internal/paths"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -26,6 +27,7 @@ type Options struct {
 	CacheDir           string   // holds catalog.json and the views
 	StatePath          string   // the skill lock
 	Environ            []string // the daemon's environment, for the doctor
+	AuditPath          string   // the agent audit log ("": paths.AuditLog())
 }
 
 // Tools is the daemon.Options.Tools hook: the agent tools on d.
@@ -104,6 +106,15 @@ func (b *backend) Doctor(ctx context.Context, dir string) []doctor.Finding {
 func (b *backend) Update(ctx context.Context, sources []string) ([]catalog.SourceState, error) {
 	r, err := b.d.UpdateSources(ctx, sources)
 	return r.Sources, err
+}
+
+func (b *backend) Restart(name string) error { return b.d.Restart(name) }
+
+func (b *backend) AuditLog() string {
+	if b.o.AuditPath != "" {
+		return b.o.AuditPath
+	}
+	return paths.AuditLog()
 }
 
 func (b *backend) Env() actions.Env {
