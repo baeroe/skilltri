@@ -70,12 +70,12 @@ func (b *backend) Status() agenttools.Status {
 	return out
 }
 
-func (b *backend) Which(dir string) agenttools.Which {
+func (b *backend) Which(dir string) (agenttools.Which, error) {
 	w, err := b.d.Which(dir)
-	if err != nil { // only for an empty dir, which the tools never pass
-		return agenttools.Which{Dir: dir}
+	if err != nil {
+		return agenttools.Which{}, err
 	}
-	return ConvertWhich(w)
+	return ConvertWhich(w), nil
 }
 
 // ConvertWhich is the agent view of a which reply.

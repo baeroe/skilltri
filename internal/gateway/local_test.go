@@ -24,7 +24,13 @@ func demoProvider(cfg *config.Config, _ SessionInfo) []LocalTool {
 				return textResult(info.Dir + "|" + info.ClientName + "|" + string(args)), nil
 			},
 		},
-		{Tool: &mcp.Tool{Name: "demo_bad_prefix", InputSchema: map[string]any{"type": "object"}}, Handle: nil},
+		{ // has a handler, so only the prefix filter keeps it out
+			Tool: &mcp.Tool{Name: "demo_bad_prefix", InputSchema: map[string]any{"type": "object"}},
+			Handle: func(context.Context, SessionInfo, json.RawMessage) (*mcp.CallToolResult, error) {
+				return textResult("bad prefix"), nil
+			},
+		},
+		{Tool: &mcp.Tool{Name: "skilltri_demo_nil_handler", InputSchema: map[string]any{"type": "object"}}, Handle: nil},
 	}
 }
 

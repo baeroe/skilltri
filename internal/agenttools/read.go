@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -31,7 +32,7 @@ func init() {
 		}, Handle: which},
 		Tool{Def: &mcp.Tool{
 			Name:        "skilltri_list_servers",
-			Description: "List the configured MCP servers: type, command or url, env and headers (values masked: ${secret:NAME} references are shown, literal values as •••), folder rules, per-tool settings and the plugin a server was imported from." + readOnly,
+			Description: "List the configured MCP servers: type, command or url, args, env and headers (values masked: ${secret:NAME} references are shown, literal values as •••; also URL credentials and query values and the values of secret-looking flags such as --api-key), folder rules, per-tool settings and the plugin a server was imported from." + readOnly,
 			InputSchema: object(nil),
 		}, Handle: listServers},
 		Tool{Def: &mcp.Tool{
@@ -56,10 +57,14 @@ func init() {
 	)
 }
 
-// dirArg is the folder of a call: dir when given, else the session's folder; normalized.
+// dirArg is the folder of a call: dir when given (a relative one below the session's folder),
+// else the session's folder; normalized.
 func dirArg(dir string, c Call) string {
-	if dir == "" {
+	switch {
+	case dir == "":
 		dir = c.Dir
+	case dir != "~" && !strings.HasPrefix(dir, "~/") && !filepath.IsAbs(dir):
+		dir = filepath.Join(c.Dir, dir)
 	}
 	return rules.Normalize(dir)
 }
@@ -75,7 +80,11 @@ func getStatus(_ context.Context, b Backend, _ Call, args json.RawMessage) (*mcp
 	if err := parseArgs(args, &struct{}{}); err != nil {
 		return errorResult(err), nil
 	}
-	st := b.Status()
+	st, cfg := b.Status(), b.Config()
+	servers := sortedBy(st.Servers, func(s ServerStatus) string { return s.Name })
+	for i := range servers {
+		servers[i].Error = maskText(servers[i].Error, cfg.Servers[servers[i].Name])
+	}
 	out := struct {
 		Daemon struct {
 			PID         int    `json:"pid"`
@@ -86,7 +95,7 @@ func getStatus(_ context.Context, b Backend, _ Call, args json.RawMessage) (*mcp
 		Sessions    int               `json:"sessions"`
 		Servers     []ServerStatus    `json:"servers"`
 		Sources     []sourceStateView `json:"sources"`
-	}{AgentAccess: b.Config().AgentAccess(), Sessions: st.Sessions, Servers: sortedBy(st.Servers, func(s ServerStatus) string { return s.Name })}
+	}{AgentAccess: cfg.AgentAccess(), Sessions: st.Sessions, Servers: servers}
 	out.Daemon.PID, out.Daemon.Version, out.Daemon.ConfigError = st.PID, st.Version, st.ConfigError
 	out.Sources = []sourceStateView{}
 	for _, s := range b.Catalog().Sources {
@@ -103,7 +112,10 @@ func which(_ context.Context, b Backend, c Call, args json.RawMessage) (*mcp.Cal
 	if err := parseArgs(args, &a); err != nil {
 		return errorResult(err), nil
 	}
-	w := b.Which(dirArg(a.Dir, c))
+	w, err := b.Which(dirArg(a.Dir, c))
+	if err != nil {
+		return errorResult(err), nil
+	}
 	w.Servers = sortedBy(w.Servers, func(s WhichServer) string { return s.Name })
 	for i := range w.Servers {
 		w.Servers[i].Tools = sortedBy(w.Servers[i].Tools, func(t WhichTool) string { return t.Name })
@@ -147,7 +159,7 @@ func listServers(_ context.Context, b Backend, _ Call, args json.RawMessage) (*m
 		if s == nil {
 			continue
 		}
-		v := serverView{Name: name, Type: s.Type, Command: s.Command, Args: s.Args, Cwd: s.Cwd, URL: s.URL,
+		v := serverView{Name: name, Type: s.Type, Command: s.Command, Args: MaskArgs(s.Args), Cwd: s.Cwd, URL: MaskURL(s.URL),
 			Env: MaskMap(s.Env), Headers: MaskMap(s.Headers), RequestTimeoutMs: s.RequestTimeoutMs,
 			Disabled: s.Disabled, PerSession: s.PerSession, Rules: s.Rules, Origin: s.Origin}
 		for tn, t := range s.Tools {

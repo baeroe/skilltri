@@ -32,8 +32,8 @@ type Backend interface {
 	Catalog() *catalog.Catalog
 	// Status is the daemon's state.
 	Status() Status
-	// Which decides every server, tool and skill for dir (already normalized).
-	Which(dir string) Which
+	// Which decides every server, tool and skill for dir (already normalized, never empty).
+	Which(dir string) (Which, error)
 	// Doctor runs the health checks as if started in dir.
 	Doctor(ctx context.Context, dir string) []doctor.Finding
 	// Update syncs the named sources (all enabled ones when empty) and rebuilds the catalog.

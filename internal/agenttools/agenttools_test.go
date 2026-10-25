@@ -21,12 +21,21 @@ import (
 const (
 	literalEnv    = "demo-literal-env-value"
 	literalHeader = "Bearer demo-literal-header-value"
+	literalArg    = "demo-literal-arg-value"
+	literalFlag   = "demo-literal-flag-value"
+	literalPass   = "demo-literal-pass"
+	literalQuery  = "demo-literal-query"
 )
+
+// literals are every secret value of the demo config; no read tool may show one.
+var literals = []string{literalEnv, literalHeader, "demo-literal-header", literalArg, literalFlag, literalPass, literalQuery}
 
 // demoBackend serves a fixed demo config and catalog and records the folders it was asked about.
 type demoBackend struct {
 	cfg *config.Config
 	cat *catalog.Catalog
+
+	status []ServerStatus // nil: the default demo states
 
 	mu        sync.Mutex
 	whichDirs []string
@@ -35,11 +44,11 @@ type demoBackend struct {
 
 func newDemoBackend() *demoBackend {
 	cfg := &config.Config{Version: 1, Servers: map[string]*config.Server{
-		"demo": {Type: "stdio", Command: "demo-mcp", Args: []string{"--verbose"},
+		"demo": {Type: "stdio", Command: "demo-mcp", Args: []string{"--verbose", "--api-key", literalArg, "--auth-token=" + literalFlag},
 			Env:   map[string]string{"API_KEY": literalEnv, "TOKEN": "${secret:demo-token}", "MIXED": "x-${secret:demo-mixed}-y"},
 			Rules: []rules.Rule{{Path: "/work/demo", Mode: rules.Tree}},
 			Tools: map[string]*config.Tool{"delete": {Disabled: true}}},
-		"web": {Type: "http", URL: "https://mcp.example.test/mcp",
+		"web": {Type: "http", URL: "https://user:" + literalPass + "@mcp.example.test/mcp?key=" + literalQuery,
 			Headers: map[string]string{"Authorization": literalHeader, "X-Key": "${secret:web-key}"},
 			Origin:  &config.Origin{Source: "market", Plugin: "web-plugin", Server: "web", DefHash: "abc"}},
 	}, Sources: map[string]*config.Source{
@@ -62,17 +71,20 @@ func newDemoBackend() *demoBackend {
 func (b *demoBackend) Config() *config.Config    { return b.cfg }
 func (b *demoBackend) Catalog() *catalog.Catalog { return b.cat }
 func (b *demoBackend) Status() Status {
+	if b.status != nil {
+		return Status{PID: 42, Servers: b.status}
+	}
 	return Status{PID: 42, Version: "0.0.0-demo", Sessions: 2, Servers: []ServerStatus{
 		{Name: "demo", State: "ready", Tools: 3, Sessions: 1},
-		{Name: "web", State: "error", Error: "connection refused"},
+		{Name: "web", State: "error", Error: `Post "https://user:` + literalPass + `@mcp.example.test/mcp?key=` + literalQuery + `": connection refused`},
 	}}
 }
-func (b *demoBackend) Which(dir string) Which {
+func (b *demoBackend) Which(dir string) (Which, error) {
 	b.mu.Lock()
 	b.whichDirs = append(b.whichDirs, dir)
 	b.mu.Unlock()
 	return Which{Dir: dir, Servers: []WhichServer{{Name: "demo", Active: true, Reason: "rule", State: "ready",
-		Tools: []WhichTool{{Name: "read", Exposed: "demo_read", Active: true}}}}}
+		Tools: []WhichTool{{Name: "read", Exposed: "demo_read", Active: true}}}}}, nil
 }
 func (b *demoBackend) Doctor(_ context.Context, dir string) []doctor.Finding {
 	b.mu.Lock()
@@ -200,7 +212,7 @@ func TestSecretsMasked(t *testing.T) {
 	b := newDemoBackend()
 	for _, name := range readTools {
 		text, _ := call(t, b, Call{Dir: t.TempDir()}, name, map[string]any{})
-		for _, lit := range []string{literalEnv, literalHeader, "demo-literal-header"} {
+		for _, lit := range literals {
 			if strings.Contains(text, lit) {
 				t.Errorf("%s output contains the literal %q", name, lit)
 			}
@@ -324,9 +336,72 @@ func TestListSources(t *testing.T) {
 
 func TestGetStatus(t *testing.T) {
 	text, _ := call(t, newDemoBackend(), Call{Dir: "/"}, "skilltri_get_status", map[string]any{})
-	for _, want := range []string{`"pid": 42`, `"sessions": 2`, `"connection refused"`, `"agentAccess": "write"`, `"commit": "0123456789abcdef0123456789abcdef01234567"`} {
+	for _, want := range []string{`"pid": 42`, `"sessions": 2`, `connection refused"`, `"agentAccess": "write"`, `"commit": "0123456789abcdef0123456789abcdef01234567"`} {
 		if !strings.Contains(text, want) {
 			t.Errorf("status misses %s: %s", want, text)
 		}
+	}
+}
+
+func TestMaskURL(t *testing.T) {
+	for in, want := range map[string]string{
+		"":                                  "",
+		"https://mcp.example.test/mcp":      "https://mcp.example.test/mcp",
+		"https://u:p@mcp.example.test/mcp":  "https://•••@mcp.example.test/mcp",
+		"https://h.test/x?key=abc&flag&v=1": "https://h.test/x?key=•••&flag&v=•••",
+		"https://h.test/x?k=${secret:demo}": "https://h.test/x?k=${secret:demo}",
+		"https://h.test/x?k=v#frag":         "https://h.test/x?k=•••#frag",
+		"://not a url":                      "•••",
+	} {
+		if got := MaskURL(in); got != want {
+			t.Errorf("MaskURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestMaskArgs(t *testing.T) {
+	in := []string{"-y", "demo-pkg", "--api-key", "abc", "--auth-token=def", "--password=${secret:pw}", "-secret", "ghi",
+		"--client-secret=", "--port=8080", "--verbose", "https://u:p@h.test/?q=1", "--token", "--next"}
+	want := []string{"-y", "demo-pkg", "--api-key", "•••", "--auth-token=•••", "--password=${secret:pw}", "-secret", "•••",
+		"--client-secret=", "--port=8080", "--verbose", "https://•••@h.test/?q=•••", "--token", "--next"}
+	if got := MaskArgs(in); !slices.Equal(got, want) {
+		t.Fatalf("MaskArgs = %q\nwant %q", got, want)
+	}
+	if MaskArgs(nil) != nil {
+		t.Fatal("MaskArgs(nil) is not nil")
+	}
+}
+
+func TestReadToolsMaskArgsAndURLs(t *testing.T) {
+	b := newDemoBackend()
+	text, _ := call(t, b, Call{Dir: "/"}, "skilltri_list_servers", map[string]any{})
+	for _, want := range []string{`"--api-key",`, `"--auth-token=•••"`, `"url": "https://•••@mcp.example.test/mcp?key=•••"`} {
+		if !strings.Contains(text, want) {
+			t.Errorf("list_servers misses %s: %s", want, text)
+		}
+	}
+	status, _ := call(t, b, Call{Dir: "/"}, "skilltri_get_status", map[string]any{})
+	if !strings.Contains(status, `https://•••@mcp.example.test/mcp?key=•••\": connection refused`) {
+		t.Errorf("status error not masked: %s", status)
+	}
+	// a literal env value echoed in a server error is masked too
+	b.cfg.Servers["demo"].Env["API_KEY"] = "demo-echoed-value"
+	b.status = []ServerStatus{{Name: "demo", State: "error", Error: "auth failed for demo-echoed-value"}}
+	status, _ = call(t, b, Call{Dir: "/"}, "skilltri_get_status", map[string]any{})
+	if strings.Contains(status, "demo-echoed-value") || !strings.Contains(status, "auth failed for •••") {
+		t.Errorf("echoed env value not masked: %s", status)
+	}
+}
+
+func TestRelativeDirJoinsSessionDir(t *testing.T) {
+	b := newDemoBackend()
+	dir := t.TempDir()
+	call(t, b, Call{Dir: dir}, "skilltri_which", map[string]any{"dir": "sub/x"})
+	text, _ := call(t, b, Call{Dir: dir}, "skilltri_list_skills", map[string]any{"dir": ".."})
+	if want := []string{rules.Normalize(filepath.Join(dir, "sub", "x"))}; !slices.Equal(b.whichDirs, want) {
+		t.Fatalf("which dirs = %v, want %v", b.whichDirs, want)
+	}
+	if want := `"dir": "` + rules.Normalize(filepath.Dir(dir)) + `"`; !strings.Contains(text, want) {
+		t.Fatalf("list_skills dir: want %s in %s", want, text)
 	}
 }

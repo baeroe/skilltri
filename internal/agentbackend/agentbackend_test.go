@@ -168,3 +168,20 @@ func TestAgentToolsInDaemonSession(t *testing.T) {
 		t.Fatal("skilltri_get_status still callable after agentAccess off")
 	}
 }
+
+// run_doctor checks the session's folder, not the daemon's working directory.
+func TestRunDoctorUsesSessionDir(t *testing.T) {
+	dir := rules.Normalize(t.TempDir())
+	cs, _, _ := startDaemon(t, demoConfig(), dir)
+	manifest := filepath.Join(dir, ".agents", "skills", ".skilltri.json")
+	if err := os.MkdirAll(filepath.Dir(manifest), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifest, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	text := callText(t, cs, "skilltri_run_doctor", nil)
+	if !strings.Contains(text, `"fix or delete `+manifest+`"`) {
+		t.Fatalf("doctor misses the project-dir finding for %s: %s", manifest, text)
+	}
+}
