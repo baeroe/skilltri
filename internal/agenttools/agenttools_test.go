@@ -38,6 +38,7 @@ type demoBackend struct {
 
 	status   []ServerStatus // nil: the default demo states
 	whichErr error
+	findings []doctor.Finding // nil: one demo finding
 
 	env        actions.Env // where write tools edit the config (writeBackend)
 	auditPath  string
@@ -104,6 +105,9 @@ func (b *demoBackend) Doctor(_ context.Context, dir string) []doctor.Finding {
 	b.mu.Lock()
 	b.doctorDir = dir
 	b.mu.Unlock()
+	if b.findings != nil {
+		return b.findings
+	}
 	return []doctor.Finding{{Severity: doctor.Warning, Check: "demo", Subject: "demo", Message: "demo finding"}}
 }
 func (b *demoBackend) Update(_ context.Context, names []string) ([]catalog.SourceState, error) {
@@ -468,5 +472,25 @@ func TestSourceURLsAndErrorsMasked(t *testing.T) {
 	}
 	if text, _ := call(t, b, Call{Dir: "/"}, "skilltri_list_sources", map[string]any{}); !strings.Contains(text, `"url": "git@git.example.test:demo/skills.git"`) {
 		t.Errorf("scp-like url changed: %s", text)
+	}
+}
+
+// Source errors are raw git stderr: the credentials of the source URL are masked wherever they
+// appear, in get_status, list_sources and run_doctor.
+func TestSourceErrorsMasked(t *testing.T) {
+	const token = "demo-source-secret-token"
+	b := newDemoBackend()
+	b.cfg.Sources["git"] = &config.Source{Type: "git", URL: "https://x-access-token:" + token + "@git.example.test/demo/skills.git"}
+	gitErr := "git fetch: remote: invalid credentials " + token + "\nfatal: Authentication failed for 'https://x-access-token:" + token + "@git.example.test/demo/skills.git/'"
+	b.cat.Sources = append(b.cat.Sources, catalog.SourceState{Name: "git", Error: gitErr})
+	b.findings = []doctor.Finding{{Severity: doctor.Error, Check: "sources", Subject: "git", Message: gitErr, Fix: "check the token " + token}}
+	for _, tool := range []string{"skilltri_get_status", "skilltri_list_sources", "skilltri_run_doctor"} {
+		text, isErr := call(t, b, Call{Dir: "/"}, tool, map[string]any{})
+		if isErr || strings.Contains(text, token) {
+			t.Errorf("%s shows the token: %s", tool, text)
+		}
+		if !strings.Contains(text, "invalid credentials •••") {
+			t.Errorf("%s: %s", tool, text)
+		}
 	}
 }

@@ -290,3 +290,16 @@ func TestReadSkill(t *testing.T) {
 		t.Errorf("large SKILL.md: %q", text)
 	}
 }
+
+func TestUpdateSourcesMasksSourceCredentials(t *testing.T) {
+	b := writeBackend(t)
+	b.cfg.Sources["git"] = &config.Source{Type: "git", URL: "https://x-access-token:" + sourceToken + "@git.example.test/demo/skills.git"}
+	b.updateStates = []catalog.SourceState{{Name: "git", Error: "remote: invalid credentials " + sourceToken}}
+	if text := mustWrite(t, b, "skilltri_update_sources", map[string]any{"sources": []string{"git"}}); strings.Contains(text, sourceToken) || !strings.Contains(text, "invalid credentials •••") {
+		t.Errorf("result = %q", text)
+	}
+	b.updateErr = errors.New("sync: token " + sourceToken + " refused")
+	if text := mustFail(t, b, "skilltri_update_sources", map[string]any{"sources": []string{"git"}}); strings.Contains(text, sourceToken) {
+		t.Errorf("error = %q", text)
+	}
+}

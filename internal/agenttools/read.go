@@ -100,7 +100,7 @@ func getStatus(_ context.Context, b Backend, _ Call, args json.RawMessage) (*mcp
 	out.Sources = []sourceStateView{}
 	for _, s := range b.Catalog().Sources {
 		v := sourceStateView(s)
-		v.Error = maskText(v.Error, nil)
+		v.Error = maskSourceText(v.Error, cfg, v.Name)
 		out.Sources = append(out.Sources, v)
 	}
 	out.Sources = sortedBy(out.Sources, func(s sourceStateView) string { return s.Name })
@@ -275,7 +275,7 @@ func listSources(_ context.Context, b Backend, _ Call, args json.RawMessage) (*m
 		}
 		st := states[name]
 		v := sourceView{Name: name, Type: s.Type, URL: maskSourceURL(s.URL), Path: s.Path, Ref: s.Ref, Subpath: s.Subpath,
-			Disabled: s.Disabled, Rules: s.Rules, Commit: st.Commit, Error: maskText(st.Error, nil), FetchedAt: st.FetchedAt}
+			Disabled: s.Disabled, Rules: s.Rules, Commit: st.Commit, Error: maskSourceText(st.Error, cfg, name), FetchedAt: st.FetchedAt}
 		switch d, err := s.Interval(); {
 		case err != nil:
 			v.UpdateEvery = s.UpdateEvery
@@ -289,7 +289,7 @@ func listSources(_ context.Context, b Backend, _ Call, args json.RawMessage) (*m
 			if s.PluginsDefault == config.PluginsDisabled {
 				v.PluginsDefault = config.PluginsDisabled
 			}
-			v.Plugins = plugins(name, s, cat, states)
+			v.Plugins = plugins(cfg, name, s, cat, states)
 		}
 		out.Sources = append(out.Sources, v)
 	}
@@ -298,7 +298,7 @@ func listSources(_ context.Context, b Backend, _ Call, args json.RawMessage) (*m
 
 // plugins lists a marketplace source's plugin entries: those in the catalog and those with a
 // config node, sorted by name.
-func plugins(source string, s *config.Source, cat *catalog.Catalog, states map[string]catalog.SourceState) []pluginView {
+func plugins(cfg *config.Config, source string, s *config.Source, cat *catalog.Catalog, states map[string]catalog.SourceState) []pluginView {
 	loaded := map[string]bool{}
 	for _, p := range cat.Plugins {
 		if p.Source == source {
@@ -313,7 +313,7 @@ func plugins(source string, s *config.Source, cat *catalog.Catalog, states map[s
 	out := []pluginView{}
 	for _, entry := range sortedKeys(loaded) {
 		st := states[source+"/plugins/"+entry]
-		v := pluginView{Name: entry, Enabled: s.PluginEnabled(entry), Loaded: loaded[entry], Commit: st.Commit, Error: maskText(st.Error, nil)}
+		v := pluginView{Name: entry, Enabled: s.PluginEnabled(entry), Loaded: loaded[entry], Commit: st.Commit, Error: maskSourceText(st.Error, cfg, source)}
 		if n := s.Plugins[entry]; n != nil {
 			v.Rules = n.Rules
 		}
@@ -330,9 +330,22 @@ func runDoctor(ctx context.Context, b Backend, c Call, args json.RawMessage) (*m
 	if ctx.Err() != nil {
 		return errorResult(ctx.Err()), nil
 	}
+	cfg := b.Config()
+	mask := func(text string) string {
+		text = maskSourceText(text, cfg, "")
+		for _, s := range cfg.Servers {
+			if s != nil {
+				text = maskText(text, s)
+			}
+		}
+		return text
+	}
 	out := struct {
 		Findings []doctor.Finding `json:"findings"`
 	}{Findings: append([]doctor.Finding{}, fs...)} // Run already sorts them
+	for i := range out.Findings {
+		out.Findings[i].Message, out.Findings[i].Fix = mask(out.Findings[i].Message), mask(out.Findings[i].Fix)
+	}
 	return jsonResult(out)
 }
 

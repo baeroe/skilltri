@@ -205,7 +205,7 @@ func updateSources(ctx context.Context, b Backend, _ Call, args json.RawMessage,
 	}
 	states, err := b.Update(ctx, names)
 	if err != nil {
-		return errors.New(maskText(err.Error(), nil))
+		return errors.New(maskSourceText(err.Error(), cfg, ""))
 	}
 	if len(states) == 0 {
 		ch.message = "No sources to update."
@@ -215,7 +215,7 @@ func updateSources(ctx context.Context, b Backend, _ Call, args json.RawMessage,
 	for _, s := range sortedBy(states, func(s catalog.SourceState) string { return s.Name }) {
 		switch commit := s.Commit; {
 		case s.Error != "":
-			lines = append(lines, fmt.Sprintf("- %s: error: %s", s.Name, maskText(s.Error, nil)))
+			lines = append(lines, fmt.Sprintf("- %s: error: %s", s.Name, maskSourceText(s.Error, cfg, s.Name)))
 		case commit != "":
 			if len(commit) > 7 {
 				commit = commit[:7]
@@ -237,7 +237,7 @@ func rebuild(ctx context.Context, b Backend, source string, ch *change) {
 		return
 	}
 	if _, err := b.Update(ctx, []string{source}); err != nil {
-		ch.warnings = append(ch.warnings, "the skill catalog was not rebuilt: "+maskText(err.Error(), nil))
+		ch.warnings = append(ch.warnings, "the skill catalog was not rebuilt: "+maskSourceText(err.Error(), b.Config(), source))
 	}
 }
 

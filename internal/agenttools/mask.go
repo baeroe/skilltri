@@ -157,6 +157,34 @@ func maskText(text string, s *config.Server) string {
 	return text
 }
 
+// maskSourceText masks free text about a skill source (a fetch error, often raw git stderr) like
+// maskText, then the userinfo, password and query values of the source's URL wherever they
+// appear (git prints them without the URL too). name is a source name or a catalog state name
+// such as "market/plugins/web" (its source); "" masks the URL secrets of every source.
+func maskSourceText(text string, cfg *config.Config, name string) string {
+	text = maskText(text, nil)
+	if text == "" || cfg == nil {
+		return text
+	}
+	name, _, _ = strings.Cut(name, "/")
+	var lits []string
+	for n, src := range cfg.Sources {
+		if src == nil || (name != "" && n != name) || !isURL(src.URL) {
+			continue
+		}
+		for _, v := range urlLiterals(src.URL) {
+			if len(v) >= 3 {
+				lits = append(lits, v)
+			}
+		}
+	}
+	slices.SortFunc(lits, func(a, b string) int { return len(b) - len(a) }) // a value containing another goes first
+	for _, v := range lits {
+		text = strings.ReplaceAll(text, v, mask)
+	}
+	return text
+}
+
 // secretLiterals lists the literal secret values of s, longest first (so a value that contains
 // another is replaced whole). Values shorter than 3 bytes are left out: masking them would garble
 // the text and they are no meaningful secret.
